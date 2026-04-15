@@ -529,8 +529,8 @@ Claude Code 后续计划建议按以下里程碑展开。
 - 创建 `knowledge_mining/`、`knowledge_assets/`、`agent_serving/`、`skills/` 目录骨架。
 - 建立单一 `pyproject.toml` + 依赖配置。
 - `agent_serving` 提供 `GET /health`。
-- 补充 `knowledge_assets/dictionaries/alias_dictionary.yaml` 初版（优先从 `old/ontology/domains/cloud_core_network*.yaml` 抽取云核心网相关条目，再补充 `old/ontology/lexicon/aliases.yaml` 中的相关别名）。
-- **验证**: `python -m agent_serving.serving.run --dev` 能启动，`curl /health` 返回 200。
+- 创建规则配置占位（command_patterns.yaml、section_patterns.yaml、term_patterns.yaml、builtin_alias_hints.yaml）和 Markdown 语料入口（corpus_seed/）。不生成正式 alias_dictionary。
+- **验证**: `python -m agent_serving.scripts.run_serving` 能启动，`curl /health` 返回 200。
 
 ### M1 资产表结构
 
@@ -604,8 +604,8 @@ Claude Code 后续计划建议按以下里程碑展开。
 - 文件 SQLite 替代 PostgreSQL，默认路径为 `.dev/agent_kb.sqlite`。
 - 内存向量索引替代 pgvector。
 - 无需 PostgreSQL、Ollama 等外部服务。
-- 通过 `python -m agent_serving.serving.run --dev` 启动运行态。
-- 通过 `python -m knowledge_mining.mining.run --dev` 运行挖掘态。
+- 通过 `python -m agent_serving.scripts.run_serving` 启动运行态。
+- 通过 `python -m knowledge_mining.mining.jobs.run` 运行挖掘态（M2+ 实现）。
 - 可选提供 `python scripts/run_dev_demo.py`，在同一进程中完成最小文档导入、资产 seed 和接口 smoke test。
 - 适合本地开发和快速验证。
 
