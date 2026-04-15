@@ -1,7 +1,7 @@
 # 云核心网 Agent Knowledge Backend 总体架构设计
 
-> **版本**: v0.2 (2026-04-15)
-> **审阅**: Codex 初稿 → Claude 审视修订
+> **版本**: v0.3 (2026-04-15)
+> **审阅**: Codex 初稿 → Claude 审视修订 → Codex 边界校正
 
 ## 1. 文档目的
 
@@ -17,6 +17,7 @@
 | ---------- | ------ | ---------------------------------------------------------------------- |
 | 2026-04-15 | Codex  | 初稿：五层架构、目录结构、里程碑 M0-M8                                    |
 | 2026-04-15 | Claude | 审视修订：单 pyproject.toml、补充 Query Normalizer、合并里程碑、补充 dev mode、answer_materials 子结构、alias_dictionary 来源、schema 治理权 |
+| 2026-04-15 | Codex  | 边界校正：修正 dev SQLite 共享问题、统一运行入口、补充根目录 scripts、修正 alias_dictionary 来源、细化 M3 子任务 |
 
 ## 2. 核心共识
 
@@ -198,6 +199,9 @@ PDF、Word、ZIP、多厂家复杂版式解析后置。
 Self_Knowledge_Evolve/
   pyproject.toml                    # 单一项目配置，统一依赖管理
   .env.example
+  scripts/                          # 跨层运维脚本
+    init_db.py                      # 统一初始化 mining/asset/serving schema
+    run_dev_demo.py                 # 可选：同进程最小 demo runner
 
   docs/
     architecture/                   # 架构设计文档（本文件所在目录）
@@ -283,21 +287,22 @@ Self_Knowledge_Evolve/
 `knowledge_assets/schemas/` 是**唯一 schema 定义源**。
 
 - Mining 和 Serving 都从这里读取表结构定义。
-- Schema 变更必须通过 migration 文件记录，由独立脚本 `scripts/init_db.py` 统一执行。
+- Schema 变更必须通过 migration 文件记录，由根目录脚本 `scripts/init_db.py` 统一执行。
 - Mining 和 Serving 均不得自行创建或修改 asset 表结构。
 
 ### 4.2 alias_dictionary 初始数据来源
 
 阶段 1A 的术语归一化字典初始数据来源：
 
-- 从 `old/ontology/lexicon/aliases.yaml` 中抽取云核心网相关条目（APN↔DNN, N4↔PFCP 等）。
-- 补充云核心网特有的命令别名（ADD APN ↔ 新增 APN ↔ 创建 APN 等）。
+- 从 `old/ontology/domains/cloud_core_network*.yaml` 中抽取云核心网节点的 `canonical_name`、`display_name_zh`、`aliases`。
+- 从 `old/ontology/lexicon/aliases.yaml` 中抽取与云核心网明确相关的条目。
+- 手工补充云核心网业务同义词和命令别名，例如 APN ↔ DNN、N4 ↔ PFCP、ADD APN ↔ 新增 APN ↔ 创建 APN。
 - 存储格式：`knowledge_assets/dictionaries/alias_dictionary.yaml`。
 - 运行时加载到 `asset.alias_dictionary` 表。
 
 ### 4.3 评测集位置
 
-M8 的 30-50 个真实问题评测集存放在 `knowledge_assets/samples/eval_questions.yaml`。
+M7 的 30-50 个真实问题评测集存放在 `knowledge_assets/samples/eval_questions.yaml`。
 
 ### 4.4 Query Normalizer 模块
 
@@ -520,8 +525,8 @@ Claude Code 后续计划建议按以下里程碑展开。
 - 创建 `knowledge_mining/`、`knowledge_assets/`、`agent_serving/`、`skills/` 目录骨架。
 - 建立单一 `pyproject.toml` + 依赖配置。
 - `agent_serving` 提供 `GET /health`。
-- 补充 `knowledge_assets/dictionaries/alias_dictionary.yaml` 初版（从 old/ontology/lexicon/aliases.yaml 抽取云核心网相关条目）。
-- **验证**: `python -m serving.run` 能启动，`curl /health` 返回 200。
+- 补充 `knowledge_assets/dictionaries/alias_dictionary.yaml` 初版（优先从 `old/ontology/domains/cloud_core_network*.yaml` 抽取云核心网相关条目，再补充 `old/ontology/lexicon/aliases.yaml` 中的相关别名）。
+- **验证**: `python -m agent_serving.serving.run --dev` 能启动，`curl /health` 返回 200。
 
 ### M1 资产表结构
 
@@ -542,11 +547,10 @@ Claude Code 后续计划建议按以下里程碑展开。
 
 ### M3 命令索引与上下文扩展
 
-- 识别 `ADD/MOD/DEL/SET/SHOW/LST/DSP` 等命令 → commands + command_aliases + command_segment_links。
-- 生成 segment_edges（prev_next, same_section, command_to_parameter, command_to_example, command_to_note, command_to_condition）。
-- 批量生成 segment embedding。
-- 质量门控检查（命令抽取命中率 > 80%，空 segment < 2%）。
-- 发布版本激活。
+- M3.1 命令入口索引：识别 `ADD/MOD/DEL/SET/SHOW/LST/DSP` 等命令 → commands + command_aliases + command_segment_links。
+- M3.2 上下文扩展边：生成 segment_edges（prev_next, same_section, command_to_parameter, command_to_example, command_to_note, command_to_condition）。
+- M3.3 向量资产：批量生成 segment embedding。
+- M3.4 发布门控：质量门控检查（命令抽取命中率 > 80%，空 segment < 2%），通过后激活发布版本。
 - **验证**: 给定命令名 `ADD APN`，能通过 command_segment_links 找到其参数段、示例段、注意事项段，并通过 segment_edges 扩展上下文。
 
 ### M4 Serving 检索引擎
@@ -587,18 +591,21 @@ Claude Code 后续计划建议按以下里程碑展开。
 
 ## 11. 开发模式
 
-> **Claude 审视补充**: 旧项目的 dev mode（SQLite :memory:）是非常有价值的开发体验，新架构应延续。
+> **Claude 审视补充**: 旧项目的 dev mode 是非常有价值的开发体验，新架构应延续。
 
 阶段 1A 支持两种运行模式：
 
 ### 11.1 开发模式（dev）
 
-- SQLite :memory: 替代 PostgreSQL。
+- 文件 SQLite 替代 PostgreSQL，默认路径为 `.dev/agent_kb.sqlite`。
 - 内存向量索引替代 pgvector。
 - 无需 PostgreSQL、Ollama 等外部服务。
-- 通过 `python -m serving.run --dev` 启动。
-- 通过 `python -m mining.run --dev` 运行挖掘。
+- 通过 `python -m agent_serving.serving.run --dev` 启动运行态。
+- 通过 `python -m knowledge_mining.mining.run --dev` 运行挖掘态。
+- 可选提供 `python scripts/run_dev_demo.py`，在同一进程中完成最小文档导入、资产 seed 和接口 smoke test。
 - 适合本地开发和快速验证。
+
+说明：不要使用 SQLite `:memory:` 作为默认 dev 存储。Mining 和 Serving 通常是两个进程，`:memory:` 无法跨进程共享数据，会导致挖掘态写入后运行态读不到资产。若需要纯内存模式，只允许在同进程 demo runner 中使用。
 
 ### 11.2 生产模式（prod）
 
@@ -631,7 +638,6 @@ Claude Code 后续计划建议按以下里程碑展开。
 - `publish_versions` 是运行态读取入口。
 - `old/` 不作为 import 依赖。
 - `knowledge_assets/schemas/` 是唯一 schema 定义源。
-- alias_dictionary 初始数据从 `old/ontology/lexicon/aliases.yaml` 抽取云核心网相关条目。
-- 支持 dev 模式（SQLite :memory:），降低开发环境依赖。
+- alias_dictionary 初始数据优先从 `old/ontology/domains/cloud_core_network*.yaml` 抽取，再补充 `old/ontology/lexicon/aliases.yaml` 中的云核心网相关条目。
+- 支持 dev 模式（文件 SQLite + 内存向量索引），降低开发环境依赖。
 - 评测集存放在 `knowledge_assets/samples/eval_questions.yaml`。
-
