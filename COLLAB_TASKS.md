@@ -53,7 +53,7 @@
   - `docs/plans/2026-04-15-m0-skeleton.md`（M0 实现计划）
 - 交接文档：`docs/handoffs/2026-04-15-m0-claude-handoff.md`
 - 审查文档：`docs/analysis/2026-04-15-m0-skeleton-codex-review.md`
-- 修复文档：
+- 修复文档：`docs/handoffs/2026-04-15-m0-claude-fix.md`
 - 管理员文档：
 - 最新消息序号：MSG-20260415-165500-codex
 - 备注：架构文档为 `docs/architecture/2026-04-15-cloud-core-agent-knowledge-architecture.md`；旧代码仅作为 `old/` 参考，不作为新系统 import 依赖。
