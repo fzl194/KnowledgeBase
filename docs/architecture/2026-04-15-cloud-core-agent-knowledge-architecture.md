@@ -1,7 +1,7 @@
 # 云核心网 Agent Knowledge Backend 总体架构设计
 
-> **版本**: v0.3 (2026-04-15)
-> **审阅**: Codex 初稿 → Claude 审视修订 → Codex 边界校正
+> **版本**: v0.4 (2026-04-15)
+> **审阅**: Codex 初稿 → Claude 审视修订 → Codex 边界校正 → Codex alias_dictionary 风险修正
 
 ## 1. 文档目的
 
@@ -18,6 +18,7 @@
 | 2026-04-15 | Codex  | 初稿：五层架构、目录结构、里程碑 M0-M8                                    |
 | 2026-04-15 | Claude | 审视修订：单 pyproject.toml、补充 Query Normalizer、合并里程碑、补充 dev mode、answer_materials 子结构、alias_dictionary 来源、schema 治理权 |
 | 2026-04-15 | Codex  | 边界校正：修正 dev SQLite 共享问题、统一运行入口、补充根目录 scripts、修正 alias_dictionary 来源、细化 M3 子任务 |
+| 2026-04-15 | Codex  | alias_dictionary 风险修正：old/ontology 不可靠，不作为正式 alias 来源；M0 改为规则占位；正式 alias 从用户导入的 Markdown 文档中抽取 |
 
 ## 2. 核心共识
 
@@ -290,15 +291,18 @@ Self_Knowledge_Evolve/
 - Schema 变更必须通过 migration 文件记录，由根目录脚本 `scripts/init_db.py` 统一执行。
 - Mining 和 Serving 均不得自行创建或修改 asset 表结构。
 
-### 4.2 alias_dictionary 初始数据来源
+### 4.2 alias_dictionary 数据来源
 
-阶段 1A 的术语归一化字典初始数据来源：
+> **Codex 风险修正 (v0.4)**: `old/ontology` 中的云核心网本体不可靠，不能作为正式 alias_dictionary 的来源。
 
-- 从 `old/ontology/domains/cloud_core_network*.yaml` 中抽取云核心网节点的 `canonical_name`、`display_name_zh`、`aliases`。
-- 从 `old/ontology/lexicon/aliases.yaml` 中抽取与云核心网明确相关的条目。
-- 手工补充云核心网业务同义词和命令别名，例如 APN ↔ DNN、N4 ↔ PFCP、ADD APN ↔ 新增 APN ↔ 创建 APN。
-- 存储格式：`knowledge_assets/dictionaries/alias_dictionary.yaml`。
-- 运行时加载到 `asset.alias_dictionary` 表。
+阶段 1A 的 alias_dictionary 策略：
+
+- **系统不依赖预置本体或旧 alias 字典启动。**
+- 用户运行时导入已解析 Markdown 产品文档后，系统基于 Markdown 标题、表格、代码块和弱规则自动生成可检索的 section、segment、命令候选、术语候选和上下文扩展边。
+- 正式 alias_dictionary 不是 Phase 1A 的前置输入，而是后续从用户导入的产品文档中抽取候选、经人工确认后形成的知识资产。
+- M0 阶段只创建规则配置占位文件（command_patterns.yaml、section_patterns.yaml、term_patterns.yaml、builtin_alias_hints.yaml），不生成正式 alias_dictionary。
+- `old/ontology` 只能作为参考候选源，不能作为默认 seed，更不能默认加载到 `asset.alias_dictionary`。
+- Mining 第一版必须是 Markdown 产品文档通用结构解析器，不得依赖某一份固定文档格式。
 
 ### 4.3 评测集位置
 
@@ -638,6 +642,6 @@ Claude Code 后续计划建议按以下里程碑展开。
 - `publish_versions` 是运行态读取入口。
 - `old/` 不作为 import 依赖。
 - `knowledge_assets/schemas/` 是唯一 schema 定义源。
-- alias_dictionary 初始数据优先从 `old/ontology/domains/cloud_core_network*.yaml` 抽取，再补充 `old/ontology/lexicon/aliases.yaml` 中的云核心网相关条目。
+- alias_dictionary 不从 `old/ontology` 生成。系统不依赖预置本体启动，正式 alias 从用户导入的 Markdown 产品文档中抽取（M2/M3）。M0 只创建规则配置占位。
 - 支持 dev 模式（文件 SQLite + 内存向量索引），降低开发环境依赖。
 - 评测集存放在 `knowledge_assets/samples/eval_questions.yaml`。
