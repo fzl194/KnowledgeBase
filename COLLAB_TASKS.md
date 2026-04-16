@@ -46,17 +46,18 @@
 - 状态：计划已制定，准备实现
 - 当前阶段：Claude Mining 已产出设计与实现计划
 - Claude：负责 `knowledge_mining/**`，提交前缀 `[claude-mining]:`，已产出设计与实现计划
-- Codex：已定义任务边界、资产三层模型与禁止修改范围
+- Codex：已定义任务边界、资产三层模型与禁止修改范围；已审查 Mining 计划并要求修订
 - 管理员：用户要求该任务与 Agent Serving 任务独立并行开发
 - 计划文档：
   - `docs/plans/2026-04-16-m1-knowledge-mining-design.md`
   - `docs/plans/2026-04-16-m1-knowledge-mining-impl-plan.md`
 - 交接文档：
 - 审查文档：
+  - `docs/analysis/2026-04-16-m1-knowledge-mining-plan-codex-review.md`
 - 修复文档：
 - 管理员文档：
   - `docs/architecture/2026-04-15-mining-serving-parallel-design.md`
-- 最新消息序号：MSG-20260416-161700-codex
+- 最新消息序号：MSG-20260416-222400-codex
 - 备注：本任务禁止修改 `agent_serving/**` 与 `skills/cloud_core_knowledge/**`；如需改共享 schema，必须先在消息中说明兼容性影响。
 
 ## TASK-20260415-m1-agent-serving
@@ -75,7 +76,7 @@
 - 修复文档：
 - 管理员文档：
   - `docs/architecture/2026-04-15-mining-serving-parallel-design.md`
-- 最新消息序号：MSG-20260416-190100-codex
+- 最新消息序号：MSG-20260416-222500-codex
 - 备注：本任务禁止修改 `knowledge_mining/**` 与 `knowledge_assets/dictionaries/**`；如需改共享 schema，必须先在消息中说明兼容性影响。
 
 ## 已完成任务

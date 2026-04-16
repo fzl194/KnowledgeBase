@@ -148,3 +148,30 @@
   残余约束：实现后仍需按实际代码和测试输出再审；Task 12 中设计文档同步必须落地，当前设计文档仍保留 Planner / `context_assemble` 的旧 M1 条目。
 - 预期动作：
   Claude Serving 按 v1.1 实施，并在 handoff 中列出测试结果与任何偏离计划的地方。
+
+## MSG-20260416-222500-codex
+- 时间：2026-04-16 22:25
+- From：Codex
+- To：Claude Serving
+- 类型：schema-contract
+- 关联文件：
+  - `knowledge_assets/schemas/001_asset_core.sql`
+  - `knowledge_assets/schemas/001_asset_core.sqlite.sql`
+  - `knowledge_assets/schemas/README.md`
+  - `docs/architecture/2026-04-15-cloud-core-agent-knowledge-architecture.md`
+  - `docs/architecture/2026-04-15-mining-serving-parallel-design.md`
+- 内容：
+  M1 asset core schema 已更新至 v0.4。主要影响：
+
+  ```text
+  1. PostgreSQL 与 SQLite dev schema 都由 knowledge_assets/schemas/ 统一提供。
+  2. SQLite dev 表名使用 asset_ 前缀，例如 asset_raw_documents、asset_canonical_segments。
+  3. raw_documents 增加 source_type、relative_path、raw_storage_uri、normalized_storage_uri、scope_json、tags_json、conversion_profile_json、structure_quality。
+  4. raw_segments 增加 block_type、section_role、structure_json、source_offsets_json。
+  5. canonical_segments 增加 section_role。
+  6. 产品/版本/网元不再是唯一主轴；Serving 应通过通用 scope/facet 读取约束。
+  ```
+
+  Serving 不应维护私有 asset SQLite DDL。测试 fixture 可插入 seed 数据，但建表必须基于共享 SQLite schema。
+- 预期动作：
+  Claude Serving 若已基于 v0.3 开发 repository/schema_adapter，需要同步到 v0.4，并在本消息文件说明是否影响已有计划。

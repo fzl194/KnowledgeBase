@@ -1,4 +1,4 @@
--- CoreMasterKB M1 Asset Core Schema v0.3
+-- CoreMasterKB M1 Asset Core Schema v0.4
 --
 -- Purpose:
 --   Shared database contract between Knowledge Mining and Agent Serving.
@@ -9,6 +9,8 @@
 -- Scope:
 --   This schema intentionally does not define ontology, facts, or evidence.
 --   L2 is canonical_segment_sources, not fact evidence.
+--   Product/version/network-element fields are optional compatibility facets;
+--   generic corpus scope should be stored in scope_json and tags_json.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
@@ -24,7 +26,19 @@ CREATE TABLE IF NOT EXISTS asset.source_batches (
     metadata_json   JSONB NOT NULL DEFAULT '{}'::jsonb,
 
     CONSTRAINT ck_source_batches_source_type
-        CHECK (source_type IN ('manual_upload', 'folder_scan', 'api_import'))
+        CHECK (
+            source_type IN (
+                'manual_upload',
+                'folder_scan',
+                'api_import',
+                'productdoc_export',
+                'official_vendor',
+                'expert_authored',
+                'user_import',
+                'synthetic_coldstart',
+                'other'
+            )
+        )
 );
 
 CREATE TABLE IF NOT EXISTS asset.publish_versions (
@@ -62,8 +76,12 @@ CREATE TABLE IF NOT EXISTS asset.raw_documents (
     publish_version_id      UUID NOT NULL REFERENCES asset.publish_versions(id) ON DELETE CASCADE,
     document_key            TEXT NOT NULL,
     source_uri              TEXT NOT NULL,
+    relative_path           TEXT,
     file_name               TEXT NOT NULL,
     file_type               TEXT NOT NULL,
+    source_type             TEXT,
+    raw_storage_uri         TEXT,
+    normalized_storage_uri  TEXT,
     title                   TEXT,
     product                 TEXT,
     product_version         TEXT,
@@ -73,14 +91,67 @@ CREATE TABLE IF NOT EXISTS asset.raw_documents (
     copied_from_document_id UUID REFERENCES asset.raw_documents(id) ON DELETE SET NULL,
     origin_batch_id         UUID REFERENCES asset.source_batches(id) ON DELETE SET NULL,
     created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    scope_json              JSONB NOT NULL DEFAULT '{}'::jsonb,
+    tags_json               JSONB NOT NULL DEFAULT '[]'::jsonb,
+    conversion_profile_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    structure_quality       TEXT NOT NULL DEFAULT 'unknown',
     metadata_json           JSONB NOT NULL DEFAULT '{}'::jsonb,
 
     CONSTRAINT ck_raw_documents_file_type
-        CHECK (file_type IN ('markdown', 'html', 'txt')),
+        CHECK (file_type IN ('markdown', 'html', 'pdf', 'doc', 'docx', 'txt', 'mixed', 'other')),
+    CONSTRAINT ck_raw_documents_source_type
+        CHECK (
+            source_type IS NULL OR
+            source_type IN (
+                'manual_upload',
+                'folder_scan',
+                'api_import',
+                'productdoc_export',
+                'official_vendor',
+                'expert_authored',
+                'user_import',
+                'synthetic_coldstart',
+                'other'
+            )
+        ),
     CONSTRAINT ck_raw_documents_document_type
         CHECK (
             document_type IS NULL OR
-            document_type IN ('command_manual', 'feature_guide', 'release_note', 'reference', 'other')
+            document_type IN (
+                'command',
+                'feature',
+                'procedure',
+                'troubleshooting',
+                'alarm',
+                'constraint',
+                'checklist',
+                'expert_note',
+                'project_note',
+                'standard',
+                'training',
+                'reference',
+                'command_manual',
+                'feature_guide',
+                'release_note',
+                'other'
+            )
+        ),
+    CONSTRAINT ck_raw_documents_scope_object
+        CHECK (jsonb_typeof(scope_json) = 'object'),
+    CONSTRAINT ck_raw_documents_tags_array
+        CHECK (jsonb_typeof(tags_json) = 'array'),
+    CONSTRAINT ck_raw_documents_conversion_profile_object
+        CHECK (jsonb_typeof(conversion_profile_json) = 'object'),
+    CONSTRAINT ck_raw_documents_structure_quality
+        CHECK (
+            structure_quality IN (
+                'full_html',
+                'markdown_converted',
+                'markdown_native',
+                'plain_text_only',
+                'mixed',
+                'unknown'
+            )
         ),
     CONSTRAINT uq_raw_documents_version_key
         UNIQUE (publish_version_id, document_key),
@@ -100,6 +171,20 @@ CREATE INDEX IF NOT EXISTS idx_raw_documents_product_scope
 CREATE INDEX IF NOT EXISTS idx_raw_documents_content_hash
     ON asset.raw_documents(publish_version_id, content_hash);
 
+CREATE INDEX IF NOT EXISTS idx_raw_documents_source_type
+    ON asset.raw_documents(publish_version_id, source_type);
+
+CREATE INDEX IF NOT EXISTS idx_raw_documents_file_type
+    ON asset.raw_documents(publish_version_id, file_type);
+
+CREATE INDEX IF NOT EXISTS idx_raw_documents_scope_json
+    ON asset.raw_documents
+    USING GIN (scope_json);
+
+CREATE INDEX IF NOT EXISTS idx_raw_documents_tags_json
+    ON asset.raw_documents
+    USING GIN (tags_json);
+
 CREATE TABLE IF NOT EXISTS asset.raw_segments (
     id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     publish_version_id     UUID NOT NULL REFERENCES asset.publish_versions(id) ON DELETE CASCADE,
@@ -110,6 +195,8 @@ CREATE TABLE IF NOT EXISTS asset.raw_segments (
     section_title          TEXT,
     heading_level          INTEGER,
     segment_type           TEXT NOT NULL,
+    block_type             TEXT NOT NULL DEFAULT 'unknown',
+    section_role           TEXT,
     command_name           TEXT,
     raw_text               TEXT NOT NULL,
     normalized_text        TEXT NOT NULL,
@@ -117,6 +204,8 @@ CREATE TABLE IF NOT EXISTS asset.raw_segments (
     normalized_hash        TEXT NOT NULL,
     token_count            INTEGER,
     copied_from_segment_id UUID REFERENCES asset.raw_segments(id) ON DELETE SET NULL,
+    structure_json         JSONB NOT NULL DEFAULT '{}'::jsonb,
+    source_offsets_json    JSONB NOT NULL DEFAULT '{}'::jsonb,
     metadata_json          JSONB NOT NULL DEFAULT '{}'::jsonb,
 
     CONSTRAINT fk_raw_segments_document_same_version
@@ -133,6 +222,12 @@ CREATE TABLE IF NOT EXISTS asset.raw_segments (
         CHECK (jsonb_typeof(section_path) = 'array'),
     CONSTRAINT ck_raw_segments_segment_type
         CHECK (segment_type IN ('command', 'parameter', 'example', 'note', 'table', 'paragraph', 'concept', 'other')),
+    CONSTRAINT ck_raw_segments_block_type
+        CHECK (block_type IN ('heading', 'paragraph', 'list', 'table', 'html_table', 'table_like', 'code', 'blockquote', 'raw_html', 'unknown')),
+    CONSTRAINT ck_raw_segments_structure_object
+        CHECK (jsonb_typeof(structure_json) = 'object'),
+    CONSTRAINT ck_raw_segments_source_offsets_object
+        CHECK (jsonb_typeof(source_offsets_json) = 'object'),
     CONSTRAINT uq_raw_segments_version_document_key
         UNIQUE (publish_version_id, raw_document_id, segment_key),
     CONSTRAINT uq_raw_segments_id_version
@@ -151,11 +246,15 @@ CREATE INDEX IF NOT EXISTS idx_raw_segments_normalized_hash
 CREATE INDEX IF NOT EXISTS idx_raw_segments_type
     ON asset.raw_segments(publish_version_id, segment_type);
 
+CREATE INDEX IF NOT EXISTS idx_raw_segments_block_role
+    ON asset.raw_segments(publish_version_id, block_type, section_role);
+
 CREATE TABLE IF NOT EXISTS asset.canonical_segments (
     id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     publish_version_id UUID NOT NULL REFERENCES asset.publish_versions(id) ON DELETE CASCADE,
     canonical_key      TEXT NOT NULL,
     segment_type       TEXT NOT NULL,
+    section_role       TEXT,
     title              TEXT,
     command_name       TEXT,
     canonical_text     TEXT NOT NULL,
@@ -184,6 +283,9 @@ CREATE INDEX IF NOT EXISTS idx_canonical_segments_command
 
 CREATE INDEX IF NOT EXISTS idx_canonical_segments_type
     ON asset.canonical_segments(publish_version_id, segment_type);
+
+CREATE INDEX IF NOT EXISTS idx_canonical_segments_section_role
+    ON asset.canonical_segments(publish_version_id, section_role);
 
 CREATE INDEX IF NOT EXISTS idx_canonical_segments_variants
     ON asset.canonical_segments(publish_version_id, has_variants);
