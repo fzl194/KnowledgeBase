@@ -43,12 +43,14 @@
 ## TASK-20260415-m1-knowledge-mining
 - 标题：M1 Knowledge Mining / 原始语料与归并语料生产
 - 级别：正式
-- 状态：已发布，待 Claude Mining 制定计划
-- 当前阶段：任务简报已发布
-- Claude：负责 `knowledge_mining/**`，提交前缀 `[claude-mining]:`
+- 状态：计划已制定，准备实现
+- 当前阶段：Claude Mining 已产出设计与实现计划
+- Claude：负责 `knowledge_mining/**`，提交前缀 `[claude-mining]:`，已产出设计与实现计划
 - Codex：已定义任务边界、资产三层模型与禁止修改范围
 - 管理员：用户要求该任务与 Agent Serving 任务独立并行开发
 - 计划文档：
+  - `docs/plans/2026-04-16-m1-knowledge-mining-design.md`
+  - `docs/plans/2026-04-16-m1-knowledge-mining-impl-plan.md`
 - 交接文档：
 - 审查文档：
 - 修复文档：
