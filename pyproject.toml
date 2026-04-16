@@ -8,6 +8,7 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "aiosqlite>=0.20",
+    "markdown-it-py>=3.0",
 ]
 
 [project.optional-dependencies]
