@@ -4,13 +4,19 @@
 
 **Goal:** Implement the online query pipeline: Agent/Skill request -> query constraint recognition -> search L1 canonical_segments -> drill down via L2 to L0 raw_segments -> return context pack.
 
-**Architecture:** Three-layer FastAPI service — API routes call Application layer (Normalizer → Planner → Assembler), which delegates data access to Repository layer. SQLite dev mode with in-memory test fixtures. Pure SQL retrieval (FTS/LIKE), no vector search in M1.
+**Architecture:** Three-layer FastAPI service — API routes call Application layer (Normalizer → Assembler), which delegates data access to Repository layer. SQLite dev mode with schema adapter from shared contract. Pure SQL retrieval (FTS/LIKE), no vector search in M1.
 
 **Tech Stack:** Python 3.11+, FastAPI, Pydantic v2, aiosqlite, pytest + pytest-asyncio + httpx
 
 **Design doc:** `docs/plans/2026-04-15-m1-agent-serving-design.md`
 **Schema contract:** `knowledge_assets/schemas/001_asset_core.sql`
+**Schema README:** `knowledge_assets/schemas/README.md`
+**Codex review:** `docs/analysis/2026-04-16-m1-agent-serving-codex-review.md`
 **Commit prefix:** `[claude-serving]:`
+
+**修订记录:**
+- v1.0 初版
+- v1.1 修订：修复 Codex review P1-P2（schema fixture 契约、dev 启动闭环、conflict candidate、文件清单同步）
 
 ---
 
@@ -45,10 +51,193 @@ git commit -m "[claude-serving]: add aiosqlite dependency for dev mode SQLite"
 
 ---
 
-### Task 2: Pydantic request/response models
+### Task 2: Schema adapter — PostgreSQL → SQLite DDL generator
+
+> **Codex review P1 fix:** 测试 fixture 不允许维护私有 asset DDL。所有 SQLite 测试表结构必须从共享 schema `001_asset_core.sql` 转换生成。
+
+**Files:**
+- Create: `agent_serving/serving/repositories/schema_adapter.py`
+- Create: `agent_serving/tests/test_schema_adapter.py`
+
+**Step 1: Write test**
+
+Create `agent_serving/tests/test_schema_adapter.py`:
+
+```python
+"""Tests for schema adapter — PostgreSQL to SQLite DDL conversion."""
+import os
+import pytest
+import aiosqlite
+from agent_serving.serving.repositories.schema_adapter import (
+    build_sqlite_ddl_from_asset_schema,
+    create_asset_tables_sqlite,
+)
+
+
+SCHEMA_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..",
+    "knowledge_assets", "schemas", "001_asset_core.sql",
+)
+
+
+def test_build_sqlite_ddl_produces_all_tables():
+    with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
+        pg_sql = f.read()
+    ddl = build_sqlite_ddl_from_asset_schema(pg_sql)
+    assert "asset_publish_versions" in ddl
+    assert "asset_raw_documents" in ddl
+    assert "asset_raw_segments" in ddl
+    assert "asset_canonical_segments" in ddl
+    assert "asset_canonical_segment_sources" in ddl
+
+
+def test_no_pg_specific_syntax():
+    with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
+        pg_sql = f.read()
+    ddl = build_sqlite_ddl_from_asset_schema(pg_sql)
+    assert "CREATE EXTENSION" not in ddl
+    assert "CREATE SCHEMA" not in ddl
+    assert "JSONB" not in ddl
+    assert "TIMESTAMPTZ" not in ddl
+    assert "gen_random_uuid" not in ddl
+
+
+@pytest.mark.asyncio
+async def test_create_tables_in_sqlite():
+    db = await aiosqlite.connect(":memory:")
+    await create_asset_tables_sqlite(db)
+    cursor = await db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+    )
+    tables = [row[0] for row in await cursor.fetchall()]
+    assert "asset_publish_versions" in tables
+    assert "asset_raw_documents" in tables
+    assert "asset_raw_segments" in tables
+    assert "asset_canonical_segments" in tables
+    assert "asset_canonical_segment_sources" in tables
+    await db.close()
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `pytest agent_serving/tests/test_schema_adapter.py -v`
+Expected: FAIL — module not found
+
+**Step 3: Write implementation**
+
+Create `agent_serving/serving/repositories/schema_adapter.py`:
+
+```python
+"""Schema adapter: convert PostgreSQL asset DDL to SQLite-compatible DDL.
+
+This module reads the shared schema contract at
+`knowledge_assets/schemas/001_asset_core.sql` and produces
+SQLite-compatible DDL. It is the ONLY place where asset table
+structure is defined for dev/test mode.
+
+No other code in agent_serving should maintain private asset DDL.
+"""
+from __future__ import annotations
+
+import os
+import re
+
+import aiosqlite
+
+_SCHEMA_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "..",
+    "knowledge_assets", "schemas", "001_asset_core.sql",
+)
+
+
+def load_asset_schema_sql() -> str:
+    with open(_SCHEMA_PATH, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def build_sqlite_ddl_from_asset_schema(pg_sql: str) -> str:
+    """Convert PostgreSQL asset DDL to SQLite-compatible DDL.
+
+    Transformations:
+    - Strip CREATE EXTENSION / CREATE SCHEMA
+    - Strip partial / unique indexes and GIN indexes
+    - Replace `asset.tablename` with `asset_tablename`
+    - UUID → TEXT, TIMESTAMPTZ → TEXT, JSONB → TEXT
+    - Remove gen_random_uuid() defaults
+    - Remove PostgreSQL-specific CHECK constraints on JSONB
+    - Remove `::jsonb` casts
+    """
+    lines = pg_sql.split("\n")
+    output_lines: list[str] = []
+    skip_block = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Skip empty schema/extension creation
+        if stripped.startswith("CREATE EXTENSION") or stripped.startswith("CREATE SCHEMA"):
+            continue
+
+        # Skip index creation (SQLite handles indexing differently)
+        if stripped.startswith("CREATE ") and "INDEX" in stripped.upper():
+            skip_block = True
+            continue
+
+        # End of skipped index block
+        if skip_block and not stripped.endswith(";"):
+            continue
+        if skip_block and stripped.endswith(";"):
+            skip_block = False
+            continue
+
+        # Transform table references: asset.name → asset_name
+        line = re.sub(r'\basset\.', "asset_", line)
+
+        # Type conversions
+        line = line.replace("UUID", "TEXT")
+        line = line.replace("JSONB", "TEXT")
+        line = line.replace("TIMESTAMPTZ", "TEXT")
+        line = line.replace("NUMERIC(5,4)", "REAL")
+        line = re.sub(r"DEFAULT gen_random_uuid\(\)", "", line)
+        line = line.replace("'[]'::jsonb", "'[]'")
+        line = line.replace("'{}'::jsonb", "'{}'")
+
+        # Remove JSONB typeof check (SQLite can't do this)
+        if "jsonb_typeof" in line:
+            continue
+
+        output_lines.append(line)
+
+    return "\n".join(output_lines)
+
+
+async def create_asset_tables_sqlite(db: aiosqlite.Connection) -> None:
+    """Create all asset tables in a SQLite database using shared schema."""
+    pg_sql = load_asset_schema_sql()
+    sqlite_ddl = build_sqlite_ddl_from_asset_schema(pg_sql)
+    await db.executescript(sqlite_ddl)
+    await db.commit()
+```
+
+**Step 4: Run tests**
+
+Run: `pytest agent_serving/tests/test_schema_adapter.py -v`
+Expected: 3 passed
+
+**Step 5: Commit**
+
+```bash
+git add agent_serving/serving/repositories/schema_adapter.py agent_serving/tests/test_schema_adapter.py
+git commit -m "[claude-serving]: add schema adapter to generate SQLite DDL from shared asset schema"
+```
+
+---
+
+### Task 3: Pydantic request/response models
 
 **Files:**
 - Create: `agent_serving/serving/schemas/models.py`
+- Create: `agent_serving/tests/test_models.py`
 
 **Step 1: Write test**
 
@@ -64,8 +253,6 @@ from agent_serving.serving.schemas.models import (
     NormalizedQuery,
     KeyObjects,
     AnswerMaterials,
-    SourceRef,
-    Uncertainty,
 )
 
 
@@ -129,11 +316,6 @@ class SearchRequest(BaseModel):
 
 class CommandUsageRequest(BaseModel):
     query: str
-
-
-class ContextAssembleRequest(BaseModel):
-    canonical_segment_ids: list[str] = Field(default_factory=list)
-    raw_segment_ids: list[str] = Field(default_factory=list)
 
 
 class KeyObjects(BaseModel):
@@ -203,7 +385,7 @@ class ContextPack(BaseModel):
     debug_trace: dict | None = None
 ```
 
-**Step 4: Run test to verify it passes**
+**Step 4: Run test**
 
 Run: `pytest agent_serving/tests/test_models.py -v`
 Expected: 4 passed
@@ -217,7 +399,9 @@ git commit -m "[claude-serving]: add Pydantic request/response models"
 
 ---
 
-### Task 3: SQLite test fixtures with seed data
+### Task 4: Test fixtures — seed data only, schema from shared contract
+
+> **Codex review P1 fix:** Fixture 不维护私有 DDL。Schema 由 schema adapter 从 `001_asset_core.sql` 生成。Fixture 只插入 seed 数据。
 
 **Files:**
 - Create: `agent_serving/tests/conftest.py`
@@ -227,30 +411,35 @@ git commit -m "[claude-serving]: add Pydantic request/response models"
 Create `agent_serving/tests/conftest.py`:
 
 ```python
-"""Shared test fixtures: in-memory SQLite with asset schema and seed data."""
+"""Shared test fixtures: SQLite from shared schema + seed data.
+
+Schema tables are created by schema_adapter from the shared
+`knowledge_assets/schemas/001_asset_core.sql`. This file only
+inserts test data — no private DDL.
+"""
 from __future__ import annotations
 
-import json
-import uuid
-from pathlib import Path
-
-import aiosqlite
-import pytest
 import pytest_asyncio
+import aiosqlite
 
-# Fixed UUIDs for deterministic tests
+from agent_serving.serving.repositories.schema_adapter import create_asset_tables_sqlite
+
+# Fixed IDs for deterministic tests
 ACTIVE_PV_ID = "11111111-1111-1111-1111-111111111111"
 DOC_UDG_ID = "22222222-2222-2222-2222-222222222222"
 DOC_UNC_ID = "33333333-3333-3333-3333-333333333333"
 RAW_SEG_ADD_APN_UDG = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 RAW_SEG_ADD_APN_UNC = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 RAW_SEG_5G_CONCEPT = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+RAW_SEG_CONFLICT = "44444444-4444-4444-4444-444444444444"
 CANON_ADD_APN = "dddddddd-dddd-dddd-dddd-dddddddddddd"
 CANON_5G = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+CANON_PARAM = "55555555-5555-5555-5555-555555555555"
 SOURCE_ADD_APN_UDG = "ffffffff-ffff-ffff-ffff-ffffffffffff"
 SOURCE_ADD_APN_UNC = "00000000-0000-0000-0000-000000000001"
+SOURCE_5G = "00000000-0000-0000-0000-000000000002"
+SOURCE_CONFLICT = "00000000-0000-0000-0000-000000000003"
 
-# Expose IDs for tests
 SEED_IDS = {
     "active_pv_id": ACTIVE_PV_ID,
     "doc_udg_id": DOC_UDG_ID,
@@ -258,136 +447,61 @@ SEED_IDS = {
     "raw_seg_add_apn_udg": RAW_SEG_ADD_APN_UDG,
     "raw_seg_add_apn_unc": RAW_SEG_ADD_APN_UNC,
     "raw_seg_5g_concept": RAW_SEG_5G_CONCEPT,
+    "raw_seg_conflict": RAW_SEG_CONFLICT,
     "canon_add_apn": CANON_ADD_APN,
     "canon_5g": CANON_5G,
+    "canon_param": CANON_PARAM,
     "source_add_apn_udg": SOURCE_ADD_APN_UDG,
     "source_add_apn_unc": SOURCE_ADD_APN_UNC,
+    "source_5g": SOURCE_5G,
+    "source_conflict": SOURCE_CONFLICT,
 }
 
-
-SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS asset_publish_versions (
-    id TEXT PRIMARY KEY,
-    version_code TEXT NOT NULL UNIQUE,
-    status TEXT NOT NULL,
-    base_publish_version_id TEXT,
-    source_batch_id TEXT,
-    description TEXT,
-    build_started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    build_finished_at TEXT,
-    activated_at TEXT,
-    build_error TEXT,
-    metadata_json TEXT NOT NULL DEFAULT '{}'
-);
-
-CREATE TABLE IF NOT EXISTS asset_raw_documents (
-    id TEXT PRIMARY KEY,
-    publish_version_id TEXT NOT NULL,
-    document_key TEXT NOT NULL,
-    source_uri TEXT NOT NULL,
-    file_name TEXT NOT NULL,
-    file_type TEXT NOT NULL,
-    title TEXT,
-    product TEXT,
-    product_version TEXT,
-    network_element TEXT,
-    document_type TEXT,
-    content_hash TEXT NOT NULL,
-    copied_from_document_id TEXT,
-    origin_batch_id TEXT,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    metadata_json TEXT NOT NULL DEFAULT '{}',
-    UNIQUE (publish_version_id, document_key)
-);
-
-CREATE TABLE IF NOT EXISTS asset_raw_segments (
-    id TEXT PRIMARY KEY,
-    publish_version_id TEXT NOT NULL,
-    raw_document_id TEXT NOT NULL,
-    segment_key TEXT NOT NULL,
-    segment_index INTEGER NOT NULL,
-    section_path TEXT NOT NULL DEFAULT '[]',
-    section_title TEXT,
-    heading_level INTEGER,
-    segment_type TEXT NOT NULL,
-    command_name TEXT,
-    raw_text TEXT NOT NULL,
-    normalized_text TEXT NOT NULL,
-    content_hash TEXT NOT NULL,
-    normalized_hash TEXT NOT NULL,
-    token_count INTEGER,
-    copied_from_segment_id TEXT,
-    metadata_json TEXT NOT NULL DEFAULT '{}',
-    UNIQUE (publish_version_id, raw_document_id, segment_key)
-);
-
-CREATE TABLE IF NOT EXISTS asset_canonical_segments (
-    id TEXT PRIMARY KEY,
-    publish_version_id TEXT NOT NULL,
-    canonical_key TEXT NOT NULL,
-    segment_type TEXT NOT NULL,
-    title TEXT,
-    command_name TEXT,
-    canonical_text TEXT NOT NULL,
-    summary TEXT,
-    search_text TEXT NOT NULL,
-    has_variants INTEGER NOT NULL DEFAULT 0,
-    variant_policy TEXT NOT NULL DEFAULT 'none',
-    quality_score REAL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    metadata_json TEXT NOT NULL DEFAULT '{}',
-    UNIQUE (publish_version_id, canonical_key)
-);
-
-CREATE TABLE IF NOT EXISTS asset_canonical_segment_sources (
-    id TEXT PRIMARY KEY,
-    publish_version_id TEXT NOT NULL,
-    canonical_segment_id TEXT NOT NULL,
-    raw_segment_id TEXT NOT NULL,
-    relation_type TEXT NOT NULL,
-    is_primary INTEGER NOT NULL DEFAULT 0,
-    priority INTEGER NOT NULL DEFAULT 100,
-    similarity_score REAL,
-    diff_summary TEXT,
-    metadata_json TEXT NOT NULL DEFAULT '{}',
-    UNIQUE (canonical_segment_id, raw_segment_id)
-);
-"""
-
+# Fixture only contains INSERT statements — no DDL.
 SEED_SQL = f"""
+-- Active publish version
 INSERT INTO asset_publish_versions (id, version_code, status, description)
 VALUES ('{ACTIVE_PV_ID}', 'PV-2026-04-15-v1', 'active', 'M1 test seed');
 
+-- L0 Documents (product/version/ne constraints live here per schema README)
 INSERT INTO asset_raw_documents (id, publish_version_id, document_key, source_uri, file_name, file_type, product, product_version, network_element, document_type, content_hash)
 VALUES
   ('{DOC_UDG_ID}', '{ACTIVE_PV_ID}', 'UDG_OM_REF', 'file:///docs/udg_om.md', 'udg_om.md', 'markdown', 'UDG', 'V100R023C10', 'UDM', 'command_manual', 'hash_udg_om'),
   ('{DOC_UNC_ID}', '{ACTIVE_PV_ID}', 'UNC_OM_REF', 'file:///docs/unc_om.md', 'unc_om.md', 'markdown', 'UNC', 'V100R023C20', 'AMF', 'command_manual', 'hash_unc_om');
 
+-- L0 Raw Segments
 INSERT INTO asset_raw_segments (id, publish_version_id, raw_document_id, segment_key, segment_index, section_path, section_title, segment_type, command_name, raw_text, normalized_text, content_hash, normalized_hash)
 VALUES
-  ('{RAW_SEG_ADD_APN_UDG}', '{ACTIVE_PV_ID}', '{DOC_UDG_ID}', 'UDG_ADD_APN', 0, '["OM参考","MML命令","ADD APN"]', 'ADD APN', 'command', 'ADD APN 命令用于在UDG上新增APN配置。语法：ADD APN=<apn-name>,[参数列表]', 'add apn 命令用于在udg上新增apn配置', 'hash_udg_add_apn', 'nhash_udg_add_apn'),
-  ('{RAW_SEG_ADD_APN_UNC}', '{ACTIVE_PV_ID}', '{DOC_UNC_ID}', 'UNC_ADD_APN', 0, '["OM参考","MML命令","ADD APN"]', 'ADD APN', 'command', 'ADD APN 命令用于在UNC上新增APN配置。语法与UDG版本有差异：ADD APN=<name>,TYPE=<type>,[参数列表]', 'add apn 命令用于在unc上新增apn配置', 'hash_unc_add_apn', 'nhash_unc_add_apn'),
-  ('{RAW_SEG_5G_CONCEPT}', '{ACTIVE_PV_ID}', '{DOC_UDG_ID}', 'UDG_5G_INTRO', 1, '["基础知识","5G概述"]', '5G概述', 'concept', NULL, '5G是第五代移动通信技术，支持增强移动宽带、海量机器通信和超高可靠低时延通信三大场景。', '5g是第五代移动通信技术', 'hash_5g', 'nhash_5g');
+  ('{RAW_SEG_ADD_APN_UDG}', '{ACTIVE_PV_ID}', '{DOC_UDG_ID}', 'UDG_ADD_APN', 0, '["OM参考","MML命令","ADD APN"]', 'ADD APN', 'command', 'ADD APN', 'ADD APN 命令用于在UDG上新增APN配置。语法：ADD APN=<apn-name>,[参数列表]', 'add apn 命令用于在udg上新增apn配置', 'hash_udg_add_apn', 'nhash_udg_add_apn'),
+  ('{RAW_SEG_ADD_APN_UNC}', '{ACTIVE_PV_ID}', '{DOC_UNC_ID}', 'UNC_ADD_APN', 0, '["OM参考","MML命令","ADD APN"]', 'ADD APN', 'command', 'ADD APN', 'ADD APN 命令用于在UNC上新增APN配置。语法与UDG版本有差异：ADD APN=<name>,TYPE=<type>,[参数列表]', 'add apn 命令用于在unc上新增apn配置', 'hash_unc_add_apn', 'nhash_unc_add_apn'),
+  ('{RAW_SEG_5G_CONCEPT}', '{ACTIVE_PV_ID}', '{DOC_UDG_ID}', 'UDG_5G_INTRO', 1, '["基础知识","5G概述"]', '5G概述', 'concept', NULL, '5G是第五代移动通信技术，支持增强移动宽带、海量机器通信和超高可靠低时延通信三大场景。', '5g是第五代移动通信技术', 'hash_5g', 'nhash_5g'),
+  ('{RAW_SEG_CONFLICT}', '{ACTIVE_PV_ID}', '{DOC_UNC_ID}', 'UNC_ADD_APN_CONFLICT', 1, '["OM参考","MML命令","ADD APN"]', 'ADD APN', 'command', 'ADD APN 参数冲突版本：APN=<name>是必填参数，与UDG版本完全不同。', 'add apn 参数冲突版本', 'hash_conflict', 'nhash_conflict');
 
+-- L1 Canonical Segments
 INSERT INTO asset_canonical_segments (id, publish_version_id, canonical_key, segment_type, title, command_name, canonical_text, summary, search_text, has_variants, variant_policy)
 VALUES
   ('{CANON_ADD_APN}', '{ACTIVE_PV_ID}', 'CANON_ADD_APN', 'command', 'ADD APN 命令', 'ADD APN', 'ADD APN 命令用于新增APN配置。不同产品的参数列表有差异。', 'ADD APN 归并命令参考', 'ADD APN 命令 新增 APN 配置 参数', 1, 'require_product_version'),
-  ('{CANON_5G}', '{ACTIVE_PV_ID}', 'CANON_5G_CONCEPT', 'concept', '5G概述', NULL, '5G是第五代移动通信技术，支持增强移动宽带、海量机器通信和超高可靠低时延通信三大场景。', '5G概念归并', '5G 第五代 移动通信 eMBB mMTC URLLC', 0, 'none');
+  ('{CANON_5G}', '{ACTIVE_PV_ID}', 'CANON_5G_CONCEPT', 'concept', '5G概述', NULL, '5G是第五代移动通信技术，支持增强移动宽带、海量机器通信和超高可靠低时延通信三大场景。', '5G概念归并', '5G 第五代 移动通信 eMBB mMTC URLLC', 0, 'none'),
+  ('{CANON_PARAM}', '{ACTIVE_PV_ID}', 'CANON_SET_PARAM', 'parameter', 'SET PARAM 命令参数', 'SET PARAM', 'SET PARAM 用于配置系统参数。', 'SET PARAM 参考', 'SET PARAM 配置 参数', 0, 'none');
 
+-- L2 Canonical Segment Sources (including conflict_candidate)
 INSERT INTO asset_canonical_segment_sources (id, publish_version_id, canonical_segment_id, raw_segment_id, relation_type, is_primary, priority, similarity_score, diff_summary, metadata_json)
 VALUES
-  ('{SOURCE_ADD_APN_UDG}', '{ACTIVE_PV_ID}', '{CANON_ADD_APN}', '{RAW_SEG_ADD_APN_UDG}', 'version_variant', 1, 100, 0.95, 'UDG版本参数列表与UNC不同', '{{\"product\": \"UDG\", \"product_version\": \"V100R023C10\", \"network_element\": \"UDM\"}}'),
-  ('{SOURCE_ADD_APN_UNC}', '{ACTIVE_PV_ID}', '{CANON_ADD_APN}', '{RAW_SEG_ADD_APN_UNC}', 'version_variant', 0, 100, 0.92, 'UNC版本语法与UDG有差异', '{{\"product\": \"UNC\", \"product_version\": \"V100R023C20\", \"network_element\": \"AMF\"}}'),
-  ('{ACTIVE_PV_ID}', '{ACTIVE_PV_ID}', '{CANON_5G}', '{RAW_SEG_5G_CONCEPT}', 'primary', 1, 100, 1.0, NULL, '{{}}');
+  ('{SOURCE_ADD_APN_UDG}', '{ACTIVE_PV_ID}', '{CANON_ADD_APN}', '{RAW_SEG_ADD_APN_UDG}', 'version_variant', 1, 100, 0.95, 'UDG版本参数列表与UNC不同', '{{}}'),
+  ('{SOURCE_ADD_APN_UNC}', '{ACTIVE_PV_ID}', '{CANON_ADD_APN}', '{RAW_SEG_ADD_APN_UNC}', 'version_variant', 0, 100, 0.92, 'UNC版本语法与UDG有差异', '{{}}'),
+  ('{SOURCE_5G}', '{ACTIVE_PV_ID}', '{CANON_5G}', '{RAW_SEG_5G_CONCEPT}', 'primary', 1, 100, 1.0, NULL, '{{}}'),
+  ('{SOURCE_CONFLICT}', '{ACTIVE_PV_ID}', '{CANON_ADD_APN}', '{RAW_SEG_CONFLICT}', 'conflict_candidate', 0, 50, 0.70, '同一命令在UNC上的参数描述存在矛盾', '{{}}');
 """
 
 
 @pytest_asyncio.fixture
 async def db_connection():
-    """In-memory SQLite with schema and seed data."""
+    """In-memory SQLite with schema from shared contract + seed data."""
     db = await aiosqlite.connect(":memory:")
     db.row_factory = aiosqlite.Row
-    await db.executescript(SCHEMA_SQL)
+    # Schema from shared contract — no private DDL
+    await create_asset_tables_sqlite(db)
+    # Seed data only
     await db.executescript(SEED_SQL)
     await db.commit()
     yield db
@@ -399,21 +513,21 @@ def seed_ids():
     return SEED_IDS
 ```
 
-**Step 2: Run to verify fixture loads**
+**Step 2: Verify fixture loads**
 
-Run: `python -c "import asyncio; from agent_serving.tests.conftest import SCHEMA_SQL, SEED_SQL; db = asyncio.run(aiosqlite.connect(':memory:')); asyncio.run(db.executescript(SCHEMA_SQL)); asyncio.run(db.executescript(SEED_SQL)); print('OK')"`
-Expected: OK
+Run: `pytest agent_serving/tests/test_schema_adapter.py agent_serving/tests/test_models.py -v`
+Expected: all pass (no import errors from conftest)
 
 **Step 3: Commit**
 
 ```bash
 git add agent_serving/tests/conftest.py
-git commit -m "[claude-serving]: add SQLite test fixtures with seed data"
+git commit -m "[claude-serving]: add test fixtures with schema from shared contract and conflict_candidate seed"
 ```
 
 ---
 
-### Task 4: AssetRepository (TDD)
+### Task 5: AssetRepository (TDD)
 
 **Files:**
 - Create: `agent_serving/serving/repositories/asset_repo.py`
@@ -424,11 +538,11 @@ git commit -m "[claude-serving]: add SQLite test fixtures with seed data"
 Create `agent_serving/tests/test_asset_repo.py`:
 
 ```python
-"""Tests for AssetRepository — read-only data access."""
+"""Tests for AssetRepository — read-only L1/L2/L0 access."""
 import pytest
 import pytest_asyncio
 from agent_serving.serving.repositories.asset_repo import AssetRepository
-from agent_serving.tests.conftest import SEED_IDS, ACTIVE_PV_ID
+from agent_serving.tests.conftest import ACTIVE_PV_ID, SEED_IDS
 
 
 @pytest_asyncio.fixture
@@ -465,6 +579,7 @@ async def test_search_canonical_empty_result(repo):
 
 @pytest.mark.asyncio
 async def test_drill_down_with_product_version(repo):
+    """Product/version constraints go through raw_documents per schema README."""
     raw_segs = await repo.drill_down(
         canonical_segment_id=SEED_IDS["canon_add_apn"],
         product="UDG",
@@ -479,7 +594,27 @@ async def test_drill_down_without_constraint_returns_all_variants(repo):
     raw_segs = await repo.drill_down(
         canonical_segment_id=SEED_IDS["canon_add_apn"],
     )
+    # 2 version_variants + 1 conflict_candidate = 3
+    assert len(raw_segs) == 3
+
+
+@pytest.mark.asyncio
+async def test_drill_down_excludes_conflict_candidates(repo):
+    raw_segs = await repo.drill_down(
+        canonical_segment_id=SEED_IDS["canon_add_apn"],
+        exclude_conflict=True,
+    )
     assert len(raw_segs) == 2
+    assert all(r["relation_type"] != "conflict_candidate" for r in raw_segs)
+
+
+@pytest.mark.asyncio
+async def test_get_conflict_sources(repo):
+    conflicts = await repo.get_conflict_sources(
+        canonical_segment_id=SEED_IDS["canon_add_apn"],
+    )
+    assert len(conflicts) == 1
+    assert conflicts[0]["relation_type"] == "conflict_candidate"
 
 
 @pytest.mark.asyncio
@@ -490,9 +625,10 @@ async def test_get_raw_segments_by_ids(repo):
 
 
 @pytest.mark.asyncio
-async def test_get_document_for_segment(repo, db_connection):
+async def test_get_document_for_segment(repo):
     doc = await repo.get_document_for_segment(SEED_IDS["raw_seg_add_apn_udg"])
     assert doc["product"] == "UDG"
+    assert doc["product_version"] == "V100R023C10"
 ```
 
 **Step 2: Run tests to verify they fail**
@@ -505,7 +641,12 @@ Expected: FAIL — module not found
 Create `agent_serving/serving/repositories/asset_repo.py`:
 
 ```python
-"""Read-only repository for asset tables (L0/L1/L2)."""
+"""Read-only repository for asset tables (L0/L1/L2).
+
+All queries enforce publish_version_id = active version per schema README.
+Document-level constraints (product/product_version/network_element) are
+obtained by joining raw_segments -> raw_documents, not from L2 metadata.
+"""
 from __future__ import annotations
 
 from typing import Any
@@ -561,8 +702,13 @@ class AssetRepository:
         product: str | None = None,
         product_version: str | None = None,
         network_element: str | None = None,
+        exclude_conflict: bool = False,
         pv_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        """L2 drill-down: canonical -> sources -> raw_segments -> raw_documents.
+
+        Returns raw segments with document-level constraints joined in.
+        """
         if pv_id is None:
             pv_id = await self.get_active_publish_version_id()
         if pv_id is None:
@@ -570,7 +716,8 @@ class AssetRepository:
 
         query = (
             "SELECT rs.*, rd.product, rd.product_version, rd.network_element, "
-            "  csources.relation_type, csources.diff_summary, csources.metadata_json "
+            "  rd.document_key, "
+            "  csources.relation_type, csources.diff_summary "
             "FROM asset_canonical_segment_sources csources "
             "JOIN asset_raw_segments rs ON csources.raw_segment_id = rs.id "
             "JOIN asset_raw_documents rd ON rs.raw_document_id = rd.id "
@@ -578,6 +725,9 @@ class AssetRepository:
             "AND csources.publish_version_id = ?"
         )
         params: list[Any] = [canonical_segment_id, pv_id]
+
+        if exclude_conflict:
+            query += " AND csources.relation_type != 'conflict_candidate'"
 
         if product:
             query += " AND rd.product = ?"
@@ -592,6 +742,33 @@ class AssetRepository:
         query += " ORDER BY csources.is_primary DESC, csources.priority ASC"
 
         cursor = await self._db.execute(query, params)
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_conflict_sources(
+        self,
+        *,
+        canonical_segment_id: str,
+        pv_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Get conflict_candidate L2 mappings for a canonical segment."""
+        if pv_id is None:
+            pv_id = await self.get_active_publish_version_id()
+        if pv_id is None:
+            return []
+
+        cursor = await self._db.execute(
+            "SELECT rs.raw_text, rs.segment_type, rs.command_name, "
+            "  rd.product, rd.product_version, rd.network_element, "
+            "  csources.relation_type, csources.diff_summary "
+            "FROM asset_canonical_segment_sources csources "
+            "JOIN asset_raw_segments rs ON csources.raw_segment_id = rs.id "
+            "JOIN asset_raw_documents rd ON rs.raw_document_id = rd.id "
+            "WHERE csources.canonical_segment_id = ? "
+            "AND csources.publish_version_id = ? "
+            "AND csources.relation_type = 'conflict_candidate'",
+            (canonical_segment_id, pv_id),
+        )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
@@ -624,236 +801,30 @@ class AssetRepository:
 **Step 4: Run tests**
 
 Run: `pytest agent_serving/tests/test_asset_repo.py -v`
-Expected: 8 passed
+Expected: 10 passed
 
 **Step 5: Commit**
 
 ```bash
 git add agent_serving/serving/repositories/asset_repo.py agent_serving/tests/test_asset_repo.py
-git commit -m "[claude-serving]: add AssetRepository with read-only L1/L2/L0 access"
+git commit -m "[claude-serving]: add AssetRepository with conflict source detection"
 ```
 
 ---
 
-### Task 5: QueryNormalizer (TDD)
+### Task 6: QueryNormalizer (TDD)
 
-**Files:**
-- Create: `agent_serving/serving/application/normalizer.py`
-- Create: `agent_serving/tests/test_normalizer.py`
+Same as v1.0 plan. See previous Task 5 for details.
 
-**Step 1: Write tests**
-
-Create `agent_serving/tests/test_normalizer.py`:
-
-```python
-"""Tests for QueryNormalizer — constraint extraction from natural language."""
-import pytest
-from agent_serving.serving.application.normalizer import QueryNormalizer
-
-
-@pytest.fixture
-def normalizer():
-    return QueryNormalizer()
-
-
-def test_extract_command_with_product_and_version(normalizer):
-    result = normalizer.normalize("UDG V100R023C10 ADD APN 怎么写")
-    assert result.command == "ADD APN"
-    assert result.product == "UDG"
-    assert result.product_version == "V100R023C10"
-    assert "product" not in result.missing_constraints
-
-
-def test_extract_command_only(normalizer):
-    result = normalizer.normalize("ADD APN 怎么写")
-    assert result.command == "ADD APN"
-    assert "product" in result.missing_constraints
-    assert "product_version" in result.missing_constraints
-
-
-def test_extract_with_chinese_operation_word(normalizer):
-    result = normalizer.normalize("新增APN怎么配置")
-    assert result.command == "ADD APN"
-
-
-def test_extract_with_network_element(normalizer):
-    result = normalizer.normalize("SMF上ADD APN怎么写")
-    assert result.command == "ADD APN"
-    assert result.network_element == "SMF"
-
-
-def test_general_query_no_command(normalizer):
-    result = normalizer.normalize("5G是什么")
-    assert result.command is None
-    assert "5G" in result.keywords
-
-
-def test_mod_command(normalizer):
-    result = normalizer.normalize("修改APN的参数")
-    assert result.command == "MOD APN"
-
-
-def test_del_command(normalizer):
-    result = normalizer.normalize("删除APN配置")
-    assert result.command == "DEL APN"
-
-
-def test_show_command(normalizer):
-    result = normalizer.normalize("查询APN配置")
-    assert result.command in ("SHOW APN", "LST APN", "DSP APN")
-
-
-def test_version_extraction(normalizer):
-    result = normalizer.normalize("UPF V200R001C00 SET PROFILE 怎么配")
-    assert result.product == "UPF"
-    assert result.product_version == "V200R001C00"
-    assert result.command == "SET PROFILE"
-```
-
-**Step 2: Run tests to verify they fail**
-
-Run: `pytest agent_serving/tests/test_normalizer.py -v`
-Expected: FAIL — module not found
-
-**Step 3: Write implementation**
-
-Create `agent_serving/serving/application/normalizer.py`:
-
-```python
-"""Query Normalizer — extract constraints from natural language queries."""
-from __future__ import annotations
-
-import re
-
-from agent_serving.serving.schemas.models import NormalizedQuery
-
-# Operation word mapping (Chinese → command prefix)
-OP_MAP = {
-    "新增": "ADD",
-    "添加": "ADD",
-    "创建": "ADD",
-    "修改": "MOD",
-    "更改": "MOD",
-    "编辑": "MOD",
-    "删除": "DEL",
-    "移除": "DEL",
-    "查询": "SHOW",
-    "查看": "DSP",
-    "显示": "LST",
-    "设置": "SET",
-    "配置": "SET",
-}
-
-COMMAND_RE = re.compile(
-    r"\b(ADD|MOD|DEL|SET|SHOW|LST|DSP)\s+([A-Z][A-Z0-9_]*)\b", re.IGNORECASE
-)
-
-PRODUCT_RE = re.compile(
-    r"\b(UDG|UNC|UPF|AMF|SMF|PCF|UDM|NRF|AUSF|BSF|NSSF)\b", re.IGNORECASE
-)
-
-VERSION_RE = re.compile(r"\b(V\d{3}R\d{3}C\d{2})\b")
-
-NE_RE = re.compile(
-    r"\b(AMF|SMF|UPF|UDM|PCF|NRF|AUSF|BSF|NSSF|SCP|UDSF|UDR)\b", re.IGNORECASE
-)
-
-# Products that are also NEs — prefer product when both match
-PRODUCT_NAMES = {"UDG", "UNC", "UPF", "AMF", "SMF", "PCF", "UDM"}
-
-
-class QueryNormalizer:
-    def normalize(self, query: str) -> NormalizedQuery:
-        command = self._extract_command(query)
-        product = self._extract_product(query)
-        product_version = self._extract_version(query)
-        network_element = self._extract_ne(query, product)
-        keywords = self._extract_keywords(query)
-        missing = self._find_missing(command, product, product_version, network_element)
-
-        return NormalizedQuery(
-            command=command,
-            product=product,
-            product_version=product_version,
-            network_element=network_element,
-            keywords=keywords,
-            missing_constraints=missing,
-        )
-
-    def _extract_command(self, query: str) -> str | None:
-        # Try direct command pattern first
-        match = COMMAND_RE.search(query)
-        if match:
-            return f"{match.group(1).upper()} {match.group(2).upper()}"
-
-        # Try Chinese operation word + target
-        for cn_word, cmd_prefix in OP_MAP.items():
-            if cn_word in query:
-                # Look for a target word after the operation word
-                after = query.split(cn_word, 1)[-1]
-                target_match = re.match(r"\s*([A-Za-z][A-Za-z0-9_]*)", after)
-                if target_match:
-                    target = target_match.group(1).upper()
-                    return f"{cmd_prefix} {target}"
-                # Operation word alone
-                return cmd_prefix
-
-        return None
-
-    def _extract_product(self, query: str) -> str | None:
-        match = PRODUCT_RE.search(query)
-        return match.group(1).upper() if match else None
-
-    def _extract_version(self, query: str) -> str | None:
-        match = VERSION_RE.search(query)
-        return match.group(1) if match else None
-
-    def _extract_ne(self, query: str, product: str | None) -> str | None:
-        # Avoid double-counting product as NE
-        for match in NE_RE.finditer(query):
-            ne = match.group(1).upper()
-            if ne != product:
-                return ne
-        return None
-
-    def _extract_keywords(self, query: str) -> list[str]:
-        # Strip known patterns, return remaining meaningful tokens
-        cleaned = query
-        for pattern in [COMMAND_RE, PRODUCT_RE, VERSION_RE, NE_RE]:
-            cleaned = pattern.sub("", cleaned)
-        tokens = [t for t in re.split(r"[\s,，、？?。.！!]+", cleaned) if len(t) > 0]
-        return tokens
-
-    def _find_missing(
-        self,
-        command: str | None,
-        product: str | None,
-        product_version: str | None,
-        network_element: str | None,
-    ) -> list[str]:
-        missing: list[str] = []
-        if command and not product:
-            missing.append("product")
-        if product and not product_version:
-            missing.append("product_version")
-        return missing
-```
-
-**Step 4: Run tests**
-
-Run: `pytest agent_serving/tests/test_normalizer.py -v`
-Expected: 9 passed
-
-**Step 5: Commit**
-
-```bash
-git add agent_serving/serving/application/normalizer.py agent_serving/tests/test_normalizer.py
-git commit -m "[claude-serving]: add QueryNormalizer with Chinese/English rule engine"
-```
+Files:
+- `agent_serving/serving/application/normalizer.py`
+- `agent_serving/tests/test_normalizer.py`
 
 ---
 
-### Task 6: ContextAssembler (TDD)
+### Task 7: ContextAssembler with conflict handling (TDD)
+
+> **Codex review P1 fix:** conflict_candidate 必须转为 uncertainty/conflict source，不作为普通答案材料。
 
 **Files:**
 - Create: `agent_serving/serving/application/assembler.py`
@@ -864,21 +835,17 @@ git commit -m "[claude-serving]: add QueryNormalizer with Chinese/English rule e
 Create `agent_serving/tests/test_assembler.py`:
 
 ```python
-"""Tests for ContextAssembler — context pack assembly logic."""
+"""Tests for ContextAssembler — context pack + conflict handling."""
 import pytest
 from agent_serving.serving.application.assembler import ContextAssembler
-from agent_serving.serving.schemas.models import NormalizedQuery, ContextPack
+from agent_serving.serving.schemas.models import NormalizedQuery
 
 
 def _make_canon(**overrides):
     base = {
-        "id": "c1",
-        "segment_type": "command",
-        "title": "ADD APN",
-        "canonical_text": "ADD APN 归并文本",
-        "command_name": "ADD APN",
-        "has_variants": 1,
-        "variant_policy": "require_product_version",
+        "id": "c1", "segment_type": "command", "title": "ADD APN",
+        "canonical_text": "ADD APN 归并文本", "command_name": "ADD APN",
+        "has_variants": 1, "variant_policy": "require_product_version",
     }
     base.update(overrides)
     return base
@@ -886,64 +853,72 @@ def _make_canon(**overrides):
 
 def _make_raw(**overrides):
     base = {
-        "id": "r1",
-        "segment_type": "command",
-        "raw_text": "ADD APN 原始文本",
+        "id": "r1", "segment_type": "command", "raw_text": "ADD APN 原始文本",
         "command_name": "ADD APN",
-        "section_path": '["OM参考","ADD APN"]',
-        "section_title": "ADD APN",
-        "product": "UDG",
-        "product_version": "V100R023C10",
-        "network_element": "UDM",
+        "section_path": '["OM参考","ADD APN"]', "section_title": "ADD APN",
+        "product": "UDG", "product_version": "V100R023C10",
+        "network_element": "UDM", "document_key": "UDG_OM_REF",
+        "relation_type": "version_variant", "diff_summary": None,
     }
     base.update(overrides)
     return base
 
 
 def test_assemble_no_variants():
-    assembler = ContextAssembler()
-    canon = _make_canon(has_variants=0, variant_policy="none")
-    pack = assembler.assemble(
-        query="5G是什么",
-        intent="general",
+    asm = ContextAssembler()
+    pack = asm.assemble(
+        query="5G是什么", intent="general",
         normalized=NormalizedQuery(keywords=["5G"]),
-        canonical_hits=[canon],
-        drill_results=[],
+        canonical_hits=[_make_canon(has_variants=0, variant_policy="none")],
+        drill_results=[], conflict_sources=[],
     )
-    assert pack.intent == "general"
     assert len(pack.answer_materials.canonical_segments) == 1
     assert len(pack.uncertainties) == 0
 
 
 def test_assemble_with_variants_and_constraints_met():
-    assembler = ContextAssembler()
-    canon = _make_canon()
-    raw = _make_raw()
-    pack = assembler.assemble(
-        query="UDG V100R023C10 ADD APN",
-        intent="command_usage",
+    asm = ContextAssembler()
+    pack = asm.assemble(
+        query="UDG V100R023C10 ADD APN", intent="command_usage",
         normalized=NormalizedQuery(command="ADD APN", product="UDG", product_version="V100R023C10"),
-        canonical_hits=[canon],
-        drill_results=[raw],
+        canonical_hits=[_make_canon()],
+        drill_results=[_make_raw()], conflict_sources=[],
     )
     assert len(pack.answer_materials.raw_segments) == 1
-    assert pack.answer_materials.raw_segments[0].raw_text == "ADD APN 原始文本"
     assert len(pack.uncertainties) == 0
 
 
 def test_assemble_variants_but_missing_constraints():
-    assembler = ContextAssembler()
-    canon = _make_canon()
-    pack = assembler.assemble(
-        query="ADD APN 怎么写",
-        intent="command_usage",
+    asm = ContextAssembler()
+    pack = asm.assemble(
+        query="ADD APN 怎么写", intent="command_usage",
         normalized=NormalizedQuery(command="ADD APN", missing_constraints=["product", "product_version"]),
-        canonical_hits=[canon],
-        drill_results=[],
+        canonical_hits=[_make_canon()],
+        drill_results=[], conflict_sources=[],
     )
     assert len(pack.uncertainties) > 0
     assert any(u.field == "product" for u in pack.uncertainties)
-    assert len(pack.suggested_followups) > 0
+
+
+def test_assemble_conflict_candidates_become_uncertainties():
+    """conflict_candidate must NOT appear as regular answer material."""
+    asm = ContextAssembler()
+    conflict = {
+        "raw_text": "冲突版本文本", "segment_type": "command",
+        "command_name": "ADD APN", "product": "UNC",
+        "product_version": "V100R023C20", "network_element": "AMF",
+        "relation_type": "conflict_candidate",
+        "diff_summary": "同一命令在UNC上的参数描述存在矛盾",
+    }
+    pack = asm.assemble(
+        query="ADD APN 参数说明", intent="command_usage",
+        normalized=NormalizedQuery(command="ADD APN"),
+        canonical_hits=[_make_canon()],
+        drill_results=[], conflict_sources=[conflict],
+    )
+    # Conflict should be in uncertainties, NOT in raw_segments
+    assert len(pack.answer_materials.raw_segments) == 0
+    assert any("冲突" in u.reason or "conflict" in u.reason.lower() for u in pack.uncertainties)
 ```
 
 **Step 2: Run tests to verify they fail**
@@ -956,7 +931,7 @@ Expected: FAIL — module not found
 Create `agent_serving/serving/application/assembler.py`:
 
 ```python
-"""ContextAssembler — build context pack from search results."""
+"""ContextAssembler — build context pack with conflict handling."""
 from __future__ import annotations
 
 import json
@@ -982,6 +957,7 @@ class ContextAssembler:
         normalized: NormalizedQuery,
         canonical_hits: list[dict],
         drill_results: list[dict],
+        conflict_sources: list[dict],
     ) -> ContextPack:
         key_objects = KeyObjects(
             command=normalized.command,
@@ -1017,6 +993,10 @@ class ContextAssembler:
 
         sources = self._build_sources(drill_results)
         uncertainties = self._build_uncertainties(normalized, canonical_hits)
+        # Add conflict uncertainties
+        conflict_uncertainties = self._build_conflict_uncertainties(conflict_sources)
+        uncertainties.extend(conflict_uncertainties)
+
         followups = self._build_followups(uncertainties)
 
         return ContextPack(
@@ -1071,11 +1051,38 @@ class ContextAssembler:
                 )
         return uncertainties
 
+    def _build_conflict_uncertainties(
+        self, conflict_sources: list[dict]
+    ) -> list[Uncertainty]:
+        """Convert conflict_candidate sources into uncertainties.
+
+        Conflict candidates are NOT returned as answer materials.
+        They become uncertainty items telling the Agent there's contradictory info.
+        """
+        uncertainties: list[Uncertainty] = []
+        for cs in conflict_sources:
+            product = cs.get("product", "未知产品")
+            diff = cs.get("diff_summary", "存在内容矛盾")
+            uncertainties.append(
+                Uncertainty(
+                    field="conflict",
+                    reason=f"知识库中存在冲突来源（{product}）：{diff}",
+                    suggested_options=[product],
+                )
+            )
+        return uncertainties
+
     def _build_followups(self, uncertainties: list[Uncertainty]) -> list[str]:
         if not uncertainties:
             return []
-        fields = [u.field for u in uncertainties]
-        return [f"请确认{'/'.join(fields)}以获取精确答案"]
+        conflict_fields = [u.field for u in uncertainties if u.field != "conflict"]
+        conflict_count = sum(1 for u in uncertainties if u.field == "conflict")
+        parts = []
+        if conflict_fields:
+            parts.append(f"请确认{'/'.join(conflict_fields)}以获取精确答案")
+        if conflict_count > 0:
+            parts.append(f"发现 {conflict_count} 处知识冲突，建议核实产品版本后重新查询")
+        return parts
 
     def _build_normalized_str(self, normalized: NormalizedQuery) -> str:
         parts: list[str] = []
@@ -1104,560 +1111,75 @@ def _parse_section_path(raw: str | list) -> list[str]:
 **Step 4: Run tests**
 
 Run: `pytest agent_serving/tests/test_assembler.py -v`
-Expected: 3 passed
+Expected: 4 passed
 
 **Step 5: Commit**
 
 ```bash
 git add agent_serving/serving/application/assembler.py agent_serving/tests/test_assembler.py
-git commit -m "[claude-serving]: add ContextAssembler with uncertainty builder"
+git commit -m "[claude-serving]: add ContextAssembler with conflict candidate handling"
 ```
 
 ---
 
-### Task 7: Serving schema (init_serving.sql)
+### Task 8: Serving schema + LogRepository
+
+> **Codex review P2 fix:** 统一 serving 表名。M1 保留日志功能但 API 暂不调用（避免伪完成），标注为可选。
 
 **Files:**
 - Create: `knowledge_assets/schemas/init_serving.sql`
-
-**Step 1: Create serving schema**
-
-Create `knowledge_assets/schemas/init_serving.sql`:
-
-```sql
--- CoreMasterKB M1 Serving Schema
---
--- Purpose:
---   Runtime tables for Agent Serving: retrieval logs and feedback.
---   Serving reads asset.* tables (defined in 001_asset_core.sql).
---   Serving writes only to serving.* tables.
-
-CREATE SCHEMA IF NOT EXISTS serving;
-
-CREATE TABLE IF NOT EXISTS serving.retrieval_logs (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    query           TEXT NOT NULL,
-    intent          TEXT,
-    normalized_query TEXT,
-    key_objects     JSONB NOT NULL DEFAULT '{}'::jsonb,
-    hit_count       INTEGER NOT NULL DEFAULT 0,
-    drill_down_used BOOLEAN NOT NULL DEFAULT FALSE,
-    has_uncertainty BOOLEAN NOT NULL DEFAULT FALSE,
-    latency_ms      INTEGER,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    metadata_json   JSONB NOT NULL DEFAULT '{}'::jsonb
-);
-
-CREATE INDEX IF NOT EXISTS idx_retrieval_logs_created
-    ON serving.retrieval_logs(created_at);
-
-CREATE INDEX IF NOT EXISTS idx_retrieval_logs_intent
-    ON serving.retrieval_logs(intent);
-```
-
-**Step 2: Commit**
-
-```bash
-git add knowledge_assets/schemas/init_serving.sql
-git commit -m "[claude-serving]: add serving schema for retrieval_logs"
-```
-
----
-
-### Task 8: LogRepository
-
-**Files:**
 - Create: `agent_serving/serving/repositories/log_repo.py`
 - Create: `agent_serving/tests/test_log_repo.py`
 
-**Step 1: Write test**
-
-Create `agent_serving/tests/test_log_repo.py`:
-
-```python
-"""Tests for LogRepository — retrieval log writing."""
-import pytest
-import pytest_asyncio
-import aiosqlite
-from agent_serving.serving.repositories.log_repo import LogRepository
-
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS serving_retrieval_logs (
-    id TEXT PRIMARY KEY,
-    query TEXT NOT NULL,
-    intent TEXT,
-    normalized_query TEXT,
-    key_objects TEXT NOT NULL DEFAULT '{}',
-    hit_count INTEGER NOT NULL DEFAULT 0,
-    drill_down_used INTEGER NOT NULL DEFAULT 0,
-    has_uncertainty INTEGER NOT NULL DEFAULT 0,
-    latency_ms INTEGER,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    metadata_json TEXT NOT NULL DEFAULT '{}'
-);
-"""
-
-
-@pytest_asyncio.fixture
-async def log_db():
-    db = await aiosqlite.connect(":memory:")
-    db.row_factory = aiosqlite.Row
-    await db.executescript(SCHEMA)
-    await db.commit()
-    yield db
-    await db.close()
-
-
-@pytest_asyncio.fixture
-async def log_repo(log_db):
-    return LogRepository(log_db)
-
-
-@pytest.mark.asyncio
-async def test_write_retrieval_log(log_repo, log_db):
-    await log_repo.log(
-        query="ADD APN 怎么写",
-        intent="command_usage",
-        normalized_query="ADD APN",
-        hit_count=1,
-        drill_down_used=True,
-        has_uncertainty=True,
-        latency_ms=50,
-    )
-    cursor = await log_db.execute("SELECT * FROM serving_retrieval_logs")
-    rows = await cursor.fetchall()
-    assert len(rows) == 1
-    assert rows[0]["query"] == "ADD APN 怎么写"
-    assert rows[0]["intent"] == "command_usage"
-```
-
-**Step 2: Run test to verify it fails**
-
-Run: `pytest agent_serving/tests/test_log_repo.py -v`
-Expected: FAIL — module not found
-
-**Step 3: Write implementation**
-
-Create `agent_serving/serving/repositories/log_repo.py`:
-
-```python
-"""LogRepository — write retrieval logs."""
-from __future__ import annotations
-
-import json
-import uuid
-
-import aiosqlite
-
-
-class LogRepository:
-    def __init__(self, db: aiosqlite.Connection) -> None:
-        self._db = db
-
-    async def log(
-        self,
-        *,
-        query: str,
-        intent: str | None = None,
-        normalized_query: str | None = None,
-        key_objects: dict | None = None,
-        hit_count: int = 0,
-        drill_down_used: bool = False,
-        has_uncertainty: bool = False,
-        latency_ms: int | None = None,
-    ) -> str:
-        log_id = str(uuid.uuid4())
-        await self._db.execute(
-            "INSERT INTO serving_retrieval_logs "
-            "(id, query, intent, normalized_query, key_objects, "
-            "hit_count, drill_down_used, has_uncertainty, latency_ms) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                log_id,
-                query,
-                intent,
-                normalized_query,
-                json.dumps(key_objects or {}),
-                hit_count,
-                int(drill_down_used),
-                int(has_uncertainty),
-                latency_ms,
-            ),
-        )
-        await self._db.commit()
-        return log_id
-```
-
-**Step 4: Run test**
-
-Run: `pytest agent_serving/tests/test_log_repo.py -v`
-Expected: 1 passed
-
-**Step 5: Commit**
-
-```bash
-git add agent_serving/serving/repositories/log_repo.py agent_serving/tests/test_log_repo.py
-git commit -m "[claude-serving]: add LogRepository for retrieval logs"
-```
+Same as v1.0 plan with table name fix (use `serving_retrieval_logs` consistently).
 
 ---
 
-### Task 9: API endpoints (command/usage + search)
+### Task 9: API endpoints with DB injection + dev startup
+
+> **Codex review P1 fix:** Dev mode 启动时检查 active publish version，不存在时 health 降级。Smoke test 必须覆盖查询级闭环。
 
 **Files:**
 - Create: `agent_serving/serving/api/command_usage.py`
 - Create: `agent_serving/serving/api/search.py`
 - Modify: `agent_serving/serving/main.py`
 
-**Step 1: Create command_usage route**
-
-Create `agent_serving/serving/api/command_usage.py`:
-
-```python
-"""POST /api/v1/command/usage — command usage query."""
-from __future__ import annotations
-
-from fastapi import APIRouter
-
-from agent_serving.serving.application.assembler import ContextAssembler
-from agent_serving.serving.application.normalizer import QueryNormalizer
-from agent_serving.serving.schemas.models import CommandUsageRequest, ContextPack
-
-router = APIRouter(prefix="/api/v1", tags=["command"])
-
-_normalizer = QueryNormalizer()
-_assembler = ContextAssembler()
-
-
-@router.post("/command/usage", response_model=ContextPack)
-async def command_usage(req: CommandUsageRequest) -> ContextPack:
-    normalized = _normalizer.normalize(req.query)
-    # Repository injection happens at app level via dependency;
-    # for M1, direct import is sufficient.
-    from agent_serving.serving.main import get_asset_repo
-
-    repo = get_asset_repo()
-
-    canonical_hits = await repo.search_canonical(command_name=normalized.command)
-
-    drill_results: list[dict] = []
-    if canonical_hits:
-        hit = canonical_hits[0]
-        if hit["has_variants"] and not normalized.missing_constraints:
-            drill_results = await repo.drill_down(
-                canonical_segment_id=hit["id"],
-                product=normalized.product,
-                product_version=normalized.product_version,
-                network_element=normalized.network_element,
-            )
-
-    return _assembler.assemble(
-        query=req.query,
-        intent="command_usage",
-        normalized=normalized,
-        canonical_hits=canonical_hits,
-        drill_results=drill_results,
-    )
-```
-
-**Step 2: Create search route**
-
-Create `agent_serving/serving/api/search.py`:
-
-```python
-"""POST /api/v1/search — general knowledge search."""
-from __future__ import annotations
-
-from fastapi import APIRouter
-
-from agent_serving.serving.application.assembler import ContextAssembler
-from agent_serving.serving.application.normalizer import QueryNormalizer
-from agent_serving.serving.schemas.models import ContextPack, SearchRequest
-
-router = APIRouter(prefix="/api/v1", tags=["search"])
-
-_normalizer = QueryNormalizer()
-_assembler = ContextAssembler()
-
-
-@router.post("/search", response_model=ContextPack)
-async def search(req: SearchRequest) -> ContextPack:
-    normalized = _normalizer.normalize(req.query)
-    from agent_serving.serving.main import get_asset_repo
-
-    repo = get_asset_repo()
-
-    # If command detected, search by command name
-    if normalized.command:
-        hits = await repo.search_canonical(command_name=normalized.command)
-    else:
-        # Keyword search using remaining tokens
-        keywords = normalized.keywords
-        hits = []
-        for kw in keywords[:3]:
-            results = await repo.search_canonical(keyword=kw)
-            hits.extend(results)
-        # Deduplicate by id
-        seen = set()
-        unique_hits = []
-        for h in hits:
-            if h["id"] not in seen:
-                seen.add(h["id"])
-                unique_hits.append(h)
-        hits = unique_hits
-
-    drill_results: list[dict] = []
-    for hit in hits:
-        if hit["has_variants"] and not normalized.missing_constraints:
-            drilled = await repo.drill_down(
-                canonical_segment_id=hit["id"],
-                product=normalized.product,
-                product_version=normalized.product_version,
-                network_element=normalized.network_element,
-            )
-            drill_results.extend(drilled)
-
-    intent = "command_usage" if normalized.command else "general_search"
-
-    return _assembler.assemble(
-        query=req.query,
-        intent=intent,
-        normalized=normalized,
-        canonical_hits=hits,
-        drill_results=drill_results,
-    )
-```
-
-**Step 3: Update main.py with routes and DB setup**
-
-Replace `agent_serving/serving/main.py`:
-
-```python
-"""Cloud Core Knowledge Backend — FastAPI application."""
-from __future__ import annotations
-
-import os
-from contextlib import asynccontextmanager
-
-import aiosqlite
-from fastapi import FastAPI
-
-from agent_serving.serving.api.command_usage import router as command_router
-from agent_serving.serving.api.health import router as health_router
-from agent_serving.serving.api.search import router as search_router
-from agent_serving.serving.repositories.asset_repo import AssetRepository
-
-_asset_repo: AssetRepository | None = None
-
-SCHEMA_SQL_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "..", "..",
-    "knowledge_assets", "schemas", "001_asset_core.sql",
-)
-
-
-def get_asset_repo() -> AssetRepository:
-    if _asset_repo is None:
-        raise RuntimeError("Database not initialized. Start the app first.")
-    return _asset_repo
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global _asset_repo
-    env = os.getenv("APP_ENV", "dev")
-    if env == "dev":
-        db_path = os.getenv("SQLITE_PATH", ".dev/agent_kb.sqlite")
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        db = await aiosqlite.connect(db_path)
-        db.row_factory = aiosqlite.Row
-        _asset_repo = AssetRepository(db)
-    yield
-    if _asset_repo is not None:
-        await _asset_repo._db.close()
-
-
-app = FastAPI(
-    title="Cloud Core Knowledge Backend",
-    version="0.2.0",
-    description="Agent Knowledge Backend for cloud core network.",
-    lifespan=lifespan,
-)
-
-app.include_router(health_router)
-app.include_router(command_router)
-app.include_router(search_router)
-```
-
-**Step 4: Commit**
-
-```bash
-git add agent_serving/serving/api/command_usage.py agent_serving/serving/api/search.py agent_serving/serving/main.py
-git commit -m "[claude-serving]: add /command/usage and /search API endpoints"
-```
+**Key changes from v1.0:**
+- `main.py` lifespan: 初始化 SQLite 后用 `schema_adapter` 建表，检查 active PV
+- `/health` 返回 db_status: "ok" | "no_data" 反映数据库状态
+- API routes inject repo + assembler via app state
 
 ---
 
-### Task 10: API integration tests
+### Task 10: API integration tests (including conflict candidate)
 
 **Files:**
 - Create: `agent_serving/tests/test_command_usage_api.py`
 - Create: `agent_serving/tests/test_search_api.py`
 
-**Step 1: Write command_usage API test**
-
-Create `agent_serving/tests/test_command_usage_api.py`:
-
-```python
-"""Integration test: POST /api/v1/command/usage."""
-import pytest
-from httpx import ASGITransport, AsyncClient
-
-from agent_serving.serving.main import app
-from agent_serving.serving.repositories.asset_repo import AssetRepository
-from agent_serving.tests.conftest import SCHEMA_SQL, SEED_SQL
-
-
-@pytest.mark.asyncio
-async def test_command_usage_with_full_constraints(db_connection):
-    # Inject repo into app
-    import agent_serving.serving.main as main_mod
-    main_mod._asset_repo = AssetRepository(db_connection)
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.post(
-            "/api/v1/command/usage",
-            json={"query": "UDG V100R023C10 ADD APN 怎么写"},
-        )
-
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["intent"] == "command_usage"
-    assert body["key_objects"]["command"] == "ADD APN"
-    assert body["key_objects"]["product"] == "UDG"
-    assert len(body["answer_materials"]["raw_segments"]) >= 1
-
-
-@pytest.mark.asyncio
-async def test_command_usage_with_missing_constraints(db_connection):
-    import agent_serving.serving.main as main_mod
-    main_mod._asset_repo = AssetRepository(db_connection)
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.post(
-            "/api/v1/command/usage",
-            json={"query": "ADD APN 怎么写"},
-        )
-
-    assert resp.status_code == 200
-    body = resp.json()
-    assert len(body["uncertainties"]) > 0
-```
-
-**Step 2: Write search API test**
-
-Create `agent_serving/tests/test_search_api.py`:
-
-```python
-"""Integration test: POST /api/v1/search."""
-import pytest
-from httpx import ASGITransport, AsyncClient
-
-from agent_serving.serving.main import app
-from agent_serving.serving.repositories.asset_repo import AssetRepository
-
-
-@pytest.mark.asyncio
-async def test_search_general_query(db_connection):
-    import agent_serving.serving.main as main_mod
-    main_mod._asset_repo = AssetRepository(db_connection)
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.post(
-            "/api/v1/search",
-            json={"query": "5G是什么"},
-        )
-
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["intent"] == "general_search"
-    assert len(body["answer_materials"]["canonical_segments"]) >= 1
-
-
-@pytest.mark.asyncio
-async def test_search_no_results(db_connection):
-    import agent_serving.serving.main as main_mod
-    main_mod._asset_repo = AssetRepository(db_connection)
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.post(
-            "/api/v1/search",
-            json={"query": "完全不存在的关键词XYZ999"},
-        )
-
-    assert resp.status_code == 200
-    body = resp.json()
-    assert len(body["answer_materials"]["canonical_segments"]) == 0
-```
-
-**Step 3: Run all tests**
-
-Run: `pytest agent_serving/tests/ -v --tb=short`
-Expected: all tests pass (test_health + test_models + test_normalizer + test_asset_repo + test_assembler + test_log_repo + test_command_usage_api + test_search_api)
-
-**Step 4: Commit**
-
-```bash
-git add agent_serving/tests/test_command_usage_api.py agent_serving/tests/test_search_api.py
-git commit -m "[claude-serving]: add API integration tests for command/usage and search"
-```
+**New tests:**
+- conflict candidate query → uncertainty with "冲突" in reason
+- health check reflects DB state
 
 ---
 
-### Task 11: Smoke test — full pipeline
+### Task 11: Smoke test — full query pipeline
 
-**Step 1: Verify health endpoint still works**
+> **Codex review P1 fix:** Smoke test must cover actual query path, not just `/health`.
 
-Run: `pytest agent_serving/tests/test_health.py -v`
-Expected: 1 passed
-
-**Step 2: Run full test suite**
-
-Run: `pytest agent_serving/tests/ -v`
-Expected: all pass
-
-**Step 3: Verify serving starts**
-
-Run: `python -m agent_serving.scripts.run_serving --port 8001 &` then `curl http://127.0.0.1:8001/health`
-Expected: `{"status":"ok","version":"0.2.0"}`
+**Step 1:** Run full test suite: `pytest agent_serving/tests/ -v`
+**Step 2:** Start dev server, verify `/health` returns db_status
+**Step 3:** Post a real `/api/v1/search` request with seed data loaded
 
 ---
 
-### Task 12: Write handoff and update tracking
+### Task 12: Update design doc and write handoff
+
+> **Codex review P2 fix:** Sync design doc file list — remove Planner and context_assemble from M1 scope (标注 M2+)。
 
 **Files:**
-- Create: `docs/handoffs/2026-04-15-m1-agent-serving-claude-serving-handoff.md`
+- Modify: `docs/plans/2026-04-15-m1-agent-serving-design.md`
+- Create: `docs/handoffs/2026-04-16-m1-agent-serving-claude-serving-handoff.md`
 - Modify: `COLLAB_TASKS.md`
 - Modify: `AGENT_MESSAGES.md`
 - Modify: `docs/messages/TASK-20260415-m1-agent-serving.md`
-
-**Step 1: Write handoff document**
-
-Document all changes, files modified, design decisions, verification results, and items for Codex to review.
-
-**Step 2: Update COLLAB_TASKS.md**
-
-Set `交接文档` field.
-
-**Step 3: Post message and update AGENT_MESSAGES**
-
-**Step 4: Commit**
-
-```bash
-git add docs/handoffs/2026-04-15-m1-agent-serving-claude-serving-handoff.md COLLAB_TASKS.md AGENT_MESSAGES.md docs/messages/TASK-20260415-m1-agent-serving.md
-git commit -m "[claude-serving]: M1 Agent Serving handoff and tracking update"
-```
