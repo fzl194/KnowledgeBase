@@ -38,10 +38,11 @@ class MarkdownParser:
 
 
 class PlainTextParser:
-    """Token-based chunking for plain text (GraphRAG-style).
+    """Paragraph-based chunking for plain text.
 
-    Splits text into chunks of `chunk_size` tokens with `chunk_overlap` tokens overlap.
-    Each chunk becomes a paragraph block.
+    Splits text by blank lines into paragraphs. Paragraphs exceeding
+    chunk_size tokens are split at token boundaries while preserving
+    original text (no reconstruction from tokens).
     """
 
     def __init__(self, chunk_size: int = 300, chunk_overlap: int = 30):
@@ -54,19 +55,25 @@ class PlainTextParser:
         if not content.strip():
             return None
 
-        tokens = _simple_tokenize(content)
-        if not tokens:
+        paragraphs = _split_paragraphs(content)
+        if not paragraphs:
             return None
 
-        chunks = _chunk_tokens(tokens, self.chunk_size, self.chunk_overlap)
-        blocks = tuple(
-            ContentBlock(block_type="paragraph", text=chunk)
-            for chunk in chunks
-        )
+        blocks: list[ContentBlock] = []
+        for para_text in paragraphs:
+            tc = _count_tokens(para_text)
+            if tc <= self.chunk_size:
+                blocks.append(ContentBlock(block_type="paragraph", text=para_text))
+            else:
+                # Split long paragraph by token-boundary windows on original text
+                chunks = _split_long_text(para_text, self.chunk_size, self.chunk_overlap)
+                for chunk in chunks:
+                    blocks.append(ContentBlock(block_type="paragraph", text=chunk))
+
         return SectionNode(
             title=file_name,
             level=0,
-            blocks=blocks,
+            blocks=tuple(blocks),
         )
 
 
@@ -95,49 +102,99 @@ def create_parser(file_type: str, **kwargs: Any) -> DocumentParser:
         return PassthroughParser()
 
 
-def _simple_tokenize(text: str) -> list[str]:
-    """Simple tokenizer: split on whitespace, CJK chars individually."""
-    tokens: list[str] = []
-    buf = ""
+def _split_paragraphs(text: str) -> list[str]:
+    """Split text by blank lines into paragraphs, preserving original text."""
+    paragraphs = []
+    current_lines: list[str] = []
+    for line in text.split("\n"):
+        if line.strip() == "":
+            if current_lines:
+                paragraphs.append("\n".join(current_lines))
+                current_lines = []
+        else:
+            current_lines.append(line)
+    if current_lines:
+        paragraphs.append("\n".join(current_lines))
+    return paragraphs
+
+
+def _count_tokens(text: str) -> int:
+    """Count tokens (CJK-aware). CJK chars count individually."""
+    count = 0
+    buf = False
     for ch in text:
         if "\u4e00" <= ch <= "\u9fff":
             if buf:
-                tokens.append(buf)
-                buf = ""
-            tokens.append(ch)
+                count += 1
+                buf = False
+            count += 1
         elif ch.isalnum():
-            buf += ch
+            buf = True
         else:
             if buf:
-                tokens.append(buf)
-                buf = ""
-            # Keep whitespace-only tokens for reconstruction
-            if ch in (" ", "\n", "\t"):
-                tokens.append(ch)
+                count += 1
+                buf = False
     if buf:
-        tokens.append(buf)
-    return tokens
+        count += 1
+    return count
 
 
-def _chunk_tokens(
-    tokens: list[str], chunk_size: int, chunk_overlap: int,
+def _find_token_boundaries(text: str) -> list[int]:
+    """Find character positions of token boundaries in text.
+
+    Returns a list of character offsets where each token starts.
+    Used for chunking while preserving original text.
+    """
+    boundaries = [0]  # Start of text is always a boundary
+    i = 0
+    in_token = False
+    while i < len(text):
+        ch = text[i]
+        if "\u4e00" <= ch <= "\u9fff":
+            if in_token:
+                in_token = False
+            boundaries.append(i)
+            i += 1
+            if i < len(text):
+                boundaries.append(i)
+        elif ch.isalnum():
+            if not in_token:
+                boundaries.append(i)
+                in_token = True
+            i += 1
+        else:
+            if in_token:
+                in_token = False
+            i += 1
+    # Remove duplicates and sort
+    return sorted(set(boundaries))
+
+
+def _split_long_text(
+    text: str, chunk_size: int, chunk_overlap: int,
 ) -> list[str]:
-    """Split token list into chunks with overlap, rejoining as strings."""
-    # First, filter to only meaningful tokens for counting
-    word_tokens = [t for t in tokens if t.strip()]
+    """Split long text into chunks based on token boundaries.
 
-    if not word_tokens:
-        return []
+    Preserves original text — does not reconstruct from tokens.
+    """
+    boundaries = _find_token_boundaries(text)
+    total_tokens = len(boundaries)
+
+    if total_tokens <= chunk_size:
+        return [text]
 
     chunks: list[str] = []
     start = 0
-    while start < len(word_tokens):
-        end = min(start + chunk_size, len(word_tokens))
-        chunk = " ".join(word_tokens[start:end])
-        if chunk.strip():
+    while start < total_tokens:
+        end = min(start + chunk_size, total_tokens)
+        char_start = boundaries[start]
+        char_end = boundaries[end] if end < total_tokens else len(text)
+        chunk = text[char_start:char_end].strip()
+        if chunk:
             chunks.append(chunk)
-        start += chunk_size - chunk_overlap
-        if start >= len(word_tokens):
+        if end >= total_tokens:
             break
+        step = chunk_size - chunk_overlap
+        start += step
 
     return chunks

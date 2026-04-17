@@ -59,6 +59,9 @@ class ContentBlock:
     text: str
     language: str | None = None
     level: int | None = None  # heading level
+    line_start: int | None = None  # 0-based line number from markdown-it token.map
+    line_end: int | None = None
+    structure: dict[str, Any] | None = None  # structured content (table columns/rows, list items, etc.)
 
 
 @dataclass(frozen=True)

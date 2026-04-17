@@ -48,20 +48,23 @@ def canonicalize(
     # Track assigned segments by composite key
     assigned: set[str] = set()
 
-    # Layer 1: exact duplicates (content_hash)
+    # Layer 1: exact duplicates (content_hash) — only process groups with > 1 member
     hash_groups: dict[str, list[RawSegmentData]] = {}
     for seg in segments:
         hash_groups.setdefault(seg.content_hash, []).append(seg)
 
-    for group in hash_groups.values():
-        canonical, group_mappings = _create_canonical_group(
-            group, profiles, f"c{canonical_idx:06d}",
-        )
-        canonical_idx += 1
-        canonicals.append(canonical)
-        mappings.extend(group_mappings)
-        for seg in group:
-            assigned.add(_seg_key(seg))
+    for hash_val, group in hash_groups.items():
+        if len(group) > 1:
+            # True exact duplicate — create canonical and mark all assigned
+            canonical, group_mappings = _create_canonical_group(
+                group, profiles, f"c{canonical_idx:06d}",
+            )
+            canonical_idx += 1
+            canonicals.append(canonical)
+            mappings.extend(group_mappings)
+            for seg in group:
+                assigned.add(_seg_key(seg))
+        # Singletons: leave unassigned for normalized/near layers
 
     # Layer 2: normalized duplicates (normalized_hash)
     norm_groups: dict[str, list[RawSegmentData]] = {}

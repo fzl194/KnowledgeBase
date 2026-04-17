@@ -1,4 +1,10 @@
-"""Structure parser: parse Markdown into SectionNode tree with ContentBlocks."""
+"""Structure parser: parse Markdown into SectionNode tree with ContentBlocks (v0.5 fix).
+
+Key fixes from Codex review:
+- P1-1: Section tree is a single parent-child hierarchy, no duplicate content.
+- P1-2: Table structure preserved in ContentBlock.structure as {columns, rows}.
+- P2-1: ContentBlock carries line_start/line_end from markdown-it token.map.
+"""
 from __future__ import annotations
 
 from markdown_it import MarkdownIt
@@ -13,15 +19,15 @@ def parse_structure(content: str) -> SectionNode:
     md = MarkdownIt().enable("table")
     tokens = md.parse(content)
 
-    # Step 1: convert tokens to flat block list
+    # Step 1: convert tokens to flat block list with line info
     blocks = _tokens_to_blocks(tokens)
 
-    # Step 2: organize into section tree
+    # Step 2: organize into hierarchical section tree
     return _build_section_tree(blocks)
 
 
 def _tokens_to_blocks(tokens: list) -> list[ContentBlock]:
-    """Convert markdown-it tokens into ContentBlock list."""
+    """Convert markdown-it tokens into ContentBlock list with structure and line info."""
     blocks: list[ContentBlock] = []
     i = 0
     while i < len(tokens):
@@ -29,40 +35,58 @@ def _tokens_to_blocks(tokens: list) -> list[ContentBlock]:
 
         if tok.type == "heading_open":
             level = int(tok.tag[1])
+            line_start = tok.map[0] if tok.map else None
             i += 1
             if i < len(tokens) and tokens[i].type == "inline":
-                blocks.append(ContentBlock(block_type="heading", text=tokens[i].content, level=level))
+                line_end = tokens[i + 1].map[0] if (i + 1) < len(tokens) and tokens[i + 1].map else line_start
+                blocks.append(ContentBlock(
+                    block_type="heading", text=tokens[i].content,
+                    level=level, line_start=line_start, line_end=line_end,
+                ))
             i += 1  # heading_close
+
         elif tok.type == "table_open":
-            parts: list[str] = []
-            j = i
-            while j < len(tokens):
-                if tokens[j].type == "table_close":
-                    break
-                if tokens[j].type == "inline":
-                    parts.append(tokens[j].content)
-                j += 1
-            blocks.append(ContentBlock(block_type="table", text=" | ".join(parts)))
-            i = j + 1
+            block = _parse_table(tokens, i)
+            blocks.append(block)
+            # Advance past table_close
+            while i < len(tokens) and tokens[i].type != "table_close":
+                i += 1
+            i += 1  # table_close
             continue
+
         elif tok.type in ("fence", "code_block"):
             lang = tok.info.strip() if tok.info else None
-            blocks.append(ContentBlock(block_type="code", text=tok.content, language=lang))
+            line_start = tok.map[0] if tok.map else None
+            line_end = tok.map[1] if tok.map else None
+            blocks.append(ContentBlock(
+                block_type="code", text=tok.content,
+                language=lang, line_start=line_start, line_end=line_end,
+            ))
+
         elif tok.type in ("bullet_list_open", "ordered_list_open"):
-            list_parts: list[str] = []
+            ordered = tok.type == "ordered_list_open"
             close_type = tok.type.replace("open", "close")
+            items: list[str] = []
+            line_start = tok.map[0] if tok.map else None
             j = i + 1
             while j < len(tokens):
                 if tokens[j].type == close_type:
                     break
                 if tokens[j].type == "inline":
-                    list_parts.append(tokens[j].content)
+                    items.append(tokens[j].content)
                 j += 1
-            blocks.append(ContentBlock(block_type="list", text="; ".join(list_parts)))
+            line_end = tok.map[1] if tok.map else None
+            blocks.append(ContentBlock(
+                block_type="list", text="\n".join(items),
+                line_start=line_start, line_end=line_end,
+                structure={"kind": "list", "ordered": ordered, "items": items, "item_count": len(items)},
+            ))
             i = j + 1
             continue
+
         elif tok.type == "blockquote_open":
             bq_parts: list[str] = []
+            line_start = tok.map[0] if tok.map else None
             j = i + 1
             while j < len(tokens):
                 if tokens[j].type == "blockquote_close":
@@ -70,105 +94,256 @@ def _tokens_to_blocks(tokens: list) -> list[ContentBlock]:
                 if tokens[j].type == "inline":
                     bq_parts.append(tokens[j].content)
                 j += 1
-            blocks.append(ContentBlock(block_type="blockquote", text=" ".join(bq_parts)))
+            line_end = tok.map[1] if tok.map else None
+            blocks.append(ContentBlock(
+                block_type="blockquote", text=" ".join(bq_parts),
+                line_start=line_start, line_end=line_end,
+            ))
             i = j + 1
             continue
+
         elif tok.type == "html_block":
             html_text = tok.content.strip()
+            line_start = tok.map[0] if tok.map else None
+            line_end = tok.map[1] if tok.map else None
             if _RE_TABLE_TAG in html_text.lower():
-                blocks.append(ContentBlock(block_type="html_table", text=html_text))
+                blocks.append(ContentBlock(
+                    block_type="html_table", text=html_text,
+                    line_start=line_start, line_end=line_end,
+                ))
             else:
-                blocks.append(ContentBlock(block_type="raw_html", text=html_text))
+                blocks.append(ContentBlock(
+                    block_type="raw_html", text=html_text,
+                    line_start=line_start, line_end=line_end,
+                ))
+
         elif tok.type == "inline":
             text = tok.content.strip()
             if text:
                 blocks.append(ContentBlock(block_type="paragraph", text=text))
+
         i += 1
 
     return blocks
 
 
+def _parse_table(tokens: list, start: int) -> ContentBlock:
+    """Parse table tokens into a ContentBlock with structured columns/rows."""
+    columns: list[str] = []
+    rows: list[dict[str, str]] = []
+    current_row_cells: list[str] = []
+    in_thead = False
+    line_start = tokens[start].map[0] if tokens[start].map else None
+    line_end = None
+
+    i = start + 1
+    while i < len(tokens) and tokens[i].type != "table_close":
+        tok = tokens[i]
+
+        if tok.type == "thead_open":
+            in_thead = True
+        elif tok.type == "thead_close":
+            in_thead = False
+        elif tok.type == "tr_close":
+            if current_row_cells:
+                if in_thead and not columns:
+                    columns = list(current_row_cells)
+                else:
+                    if columns:
+                        row_dict = {columns[j]: cell for j, cell in enumerate(current_row_cells) if j < len(columns)}
+                    else:
+                        row_dict = {f"col{j}": cell for j, cell in enumerate(current_row_cells)}
+                    rows.append(row_dict)
+                current_row_cells = []
+        elif tok.type == "inline":
+            current_row_cells.append(tok.content)
+
+        if tokens[i].map:
+            line_end = tokens[i].map[1]
+
+        i += 1
+
+    if not line_end:
+        line_end = line_start
+
+    col_count = len(columns) if columns else 0
+    row_count = len(rows)
+
+    # Reconstruct readable text
+    if columns and rows:
+        text_lines = [" | ".join(columns)]
+        for row in rows:
+            text_lines.append(" | ".join(row.get(col, "") for col in columns))
+        readable_text = "\n".join(text_lines)
+    elif columns:
+        readable_text = " | ".join(columns)
+    else:
+        readable_text = ""
+
+    return ContentBlock(
+        block_type="table",
+        text=readable_text,
+        line_start=line_start,
+        line_end=line_end,
+        structure={
+            "kind": "markdown_table",
+            "columns": columns,
+            "rows": rows,
+            "row_count": row_count,
+            "col_count": col_count,
+        },
+    )
+
+
 def _build_section_tree(blocks: list[ContentBlock]) -> SectionNode:
-    """Build section tree from flat block list using heading boundaries."""
+    """Build a hierarchical section tree from flat block list.
+
+    Uses a stack-based approach:
+    - H1 sections become root children
+    - H2 sections become children of the nearest preceding H1
+    - H3 sections become children of the nearest preceding H2
+    - No content appears in multiple sections (no duplicates).
+    """
     if not blocks:
         return SectionNode(title=None, level=0)
 
-    # Find heading indices
     heading_indices = [i for i, b in enumerate(blocks) if b.block_type == "heading"]
 
     if not heading_indices:
-        # No headings — everything goes into a root section
         return SectionNode(title=None, level=0, blocks=tuple(blocks))
 
-    # First heading is the root
-    first_heading = blocks[heading_indices[0]]
+    # Find the minimum heading level (e.g., H1)
+    min_level = min(blocks[i].level for i in heading_indices if blocks[i].level)
 
-    # Pre-heading blocks (before any heading)
+    # Collect pre-heading blocks (before the first heading)
     pre_blocks = tuple(blocks[:heading_indices[0]])
 
-    # Split into top-level sections at h1/h2 boundaries
-    # For simplicity: collect all sections and make them children of the root
-    sections: list[SectionNode] = []
-    for si, start_idx in enumerate(heading_indices):
-        heading = blocks[start_idx]
-        # End at next same-or-higher-level heading, or end of blocks
-        end_idx = len(blocks)
-        for next_idx in heading_indices[si + 1:]:
-            if blocks[next_idx].level is not None and heading.level is not None:
-                if blocks[next_idx].level <= heading.level:
-                    end_idx = next_idx
-                    break
-        section_blocks = blocks[start_idx + 1:end_idx]
-        sections.append(_make_section(heading, section_blocks))
+    # Split blocks into top-level sections at the minimum heading level
+    top_sections: list[list[ContentBlock]] = []
+    current_section: list[ContentBlock] = []
 
-    return SectionNode(
-        title=first_heading.text,
-        level=first_heading.level or 1,
-        blocks=pre_blocks,
-        children=tuple(sections),
-    )
+    for i, b in enumerate(blocks):
+        if i < heading_indices[0]:
+            continue  # skip pre-heading blocks
+        if b.block_type == "heading" and b.level == min_level:
+            if current_section:
+                top_sections.append(current_section)
+            current_section = [b]
+        else:
+            current_section.append(b)
+
+    if current_section:
+        top_sections.append(current_section)
+
+    # Build each top-level section into a SectionNode with recursive nesting
+    children: list[SectionNode] = []
+    for section_blocks in top_sections:
+        if section_blocks and section_blocks[0].block_type == "heading":
+            children.append(_build_nested_section(section_blocks))
+        else:
+            children.append(SectionNode(title=None, level=0, blocks=tuple(section_blocks)))
+
+    # If there's only one top-level H1, use it as the root title
+    if len(children) == 1 and children[0].title:
+        root = children[0]
+        return SectionNode(
+            title=root.title,
+            level=root.level,
+            blocks=pre_blocks + root.blocks,
+            children=root.children,
+        )
+
+    return SectionNode(title=None, level=0, blocks=pre_blocks, children=tuple(children))
 
 
-def _make_section(heading: ContentBlock, content_blocks: list[ContentBlock]) -> SectionNode:
-    """Create a section from a heading and its content blocks."""
-    # Check for sub-headings
+def _build_nested_section(blocks: list[ContentBlock]) -> SectionNode:
+    """Recursively build a section with nested sub-sections.
+
+    The first block must be a heading. Sub-headings with higher level
+    become children of this section.
+    """
+    if not blocks:
+        return SectionNode(title=None, level=0)
+
+    heading = blocks[0]
+    if heading.block_type != "heading":
+        return SectionNode(title=None, level=0, blocks=tuple(blocks))
+
+    heading_level = heading.level or 1
+    content_blocks = blocks[1:]
+
+    # Find direct sub-heading indices (immediate children, level > heading_level)
     sub_heading_indices = [
         i for i, b in enumerate(content_blocks)
-        if b.block_type == "heading" and (b.level or 1) > (heading.level or 1)
+        if b.block_type == "heading" and (b.level or 1) > heading_level
     ]
 
     if not sub_heading_indices:
+        # Leaf section — all content belongs here
         return SectionNode(
             title=heading.text,
-            level=heading.level or 1,
+            level=heading_level,
             blocks=tuple(content_blocks),
         )
 
-    # Has sub-sections: split them
-    non_heading_blocks: list[ContentBlock] = []
+    # Split content into direct blocks and sub-sections
+    # Direct blocks: everything before the first sub-heading
+    # Sub-sections: from each sub-heading to the next same-or-higher-level heading
+    direct_blocks: list[ContentBlock] = []
     children: list[SectionNode] = []
 
-    for sub_idx in sub_heading_indices:
-        sub_heading = content_blocks[sub_idx]
-        # Find end of sub-section
-        end = len(content_blocks)
-        for later_idx in sub_heading_indices[sub_heading_indices.index(sub_idx) + 1:]:
-            if (content_blocks[later_idx].level or 1) <= (sub_heading.level or 1):
-                end = later_idx
-                break
-        sub_content = content_blocks[sub_idx + 1:end]
-        children.append(_make_section(sub_heading, sub_content))
+    # Collect blocks before first sub-heading
+    first_sub = sub_heading_indices[0]
+    direct_blocks = [b for b in content_blocks[:first_sub] if b.block_type != "heading"]
 
-    # Collect non-heading, non-sub-heading blocks
-    direct_blocks = [
-        b for b in content_blocks
-        if b.block_type != "heading" or (b.level or 1) <= (heading.level or 1)
-    ]
-    non_heading_blocks = [b for b in direct_blocks if b.block_type != "heading"]
+    # Build sub-sections by finding groups of consecutive sub-headings at the same level
+    # and their content until the next heading at the same or lower level
+    sub_sections_raw = _split_sub_sections(content_blocks, heading_level)
+
+    for sub_section_blocks in sub_sections_raw:
+        if sub_section_blocks and sub_section_blocks[0].block_type == "heading":
+            children.append(_build_nested_section(sub_section_blocks))
+        else:
+            direct_blocks.extend(sub_section_blocks)
 
     return SectionNode(
         title=heading.text,
-        level=heading.level or 1,
-        blocks=tuple(non_heading_blocks),
+        level=heading_level,
+        blocks=tuple(direct_blocks),
         children=tuple(children),
     )
+
+
+def _split_sub_sections(
+    content_blocks: list[ContentBlock],
+    parent_level: int,
+) -> list[list[ContentBlock]]:
+    """Split content blocks into sub-section groups at parent_level + 1.
+
+    Each group starts with a heading at parent_level + 1 and contains
+    all blocks until the next heading at the same or lower level.
+    Headings at levels <= parent_level are not included (shouldn't occur here).
+    """
+    result: list[list[ContentBlock]] = []
+    current: list[ContentBlock] = []
+    target_level = parent_level + 1
+
+    for block in content_blocks:
+        if block.block_type == "heading":
+            block_level = block.level or 1
+            if block_level == target_level:
+                # Start a new sub-section at the target level
+                if current:
+                    result.append(current)
+                current = [block]
+            elif block_level > target_level:
+                # Deeper heading — belongs to current sub-section
+                current.append(block)
+            # block_level < target_level: shouldn't happen, skip
+        else:
+            current.append(block)
+
+    if current:
+        result.append(current)
+
+    return result

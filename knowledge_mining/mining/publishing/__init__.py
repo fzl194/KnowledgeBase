@@ -1,13 +1,19 @@
-"""Publishing module: write pipeline results to SQLite with full lifecycle (v0.5).
+"""Publishing module: write pipeline results to SQLite with full lifecycle (v0.5 fix).
+
+Key fixes:
+- P1-4: version_code uses microsecond timestamp + short UUID
+- P1-5: activate + metadata in same commit; on failure rollback preserves old active
+- P1-6: validation uses LEFT JOIN to detect zero-primary canonicals
+- P2-3: processing_profile_json includes parse_status for all documents
 
 Flow:
 1. Create source_batch + staging publish_version
-2. Write all raw_documents
-3. Write all raw_segments (only for parsable file types)
+2. Write all raw_documents (with parse_status in processing_profile)
+3. Write all raw_segments
 4. Write all canonical_segments
 5. Write all canonical_segment_sources
 6. Validate integrity
-7. Atomic: archive old active → activate new staging
+7. Atomic: archive old active → activate new staging → update metadata → commit
 8. On failure: mark new version as failed, old active unchanged
 """
 from __future__ import annotations
@@ -16,6 +22,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from knowledge_mining.mining.db import MiningDB
 from knowledge_mining.mining.models import (
@@ -25,6 +32,20 @@ from knowledge_mining.mining.models import (
     RawSegmentData,
     SourceMappingData,
 )
+
+
+def _make_version_code() -> str:
+    """Generate unique version_code: pv-YYYYMMDD-HHmmss-XXXXXX."""
+    now = datetime.now()
+    short_id = uuid4().hex[:6]
+    return f"pv-{now.strftime('%Y%m%d-%H%M%S')}-{short_id}"
+
+
+def _make_batch_code() -> str:
+    """Generate unique batch_code: batch-YYYYMMDD-HHmmss-XXXXXX."""
+    now = datetime.now()
+    short_id = uuid4().hex[:6]
+    return f"batch-{now.strftime('%Y%m%d-%H%M%S')}-{short_id}"
 
 
 def publish(
@@ -40,9 +61,8 @@ def publish(
     Returns summary with active_version_id and statistics.
     """
     batch_params = batch_params or BatchParams()
-    now = datetime.now()
-    batch_code = f"batch-{now.strftime('%Y%m%d-%H%M%S')}"
-    version_code = f"pv-{now.strftime('%Y%m%d-%H%M%S')}"
+    batch_code = _make_batch_code()
+    version_code = _make_version_code()
 
     db = MiningDB(db_path)
     db.create_tables()
@@ -62,19 +82,36 @@ def publish(
             conn, batch_code, batch_params.default_source_type,
             metadata_json=batch_metadata,
         )
+        now = datetime.now()
         pv_metadata: dict[str, Any] = {"started_at": now.isoformat()}
         pv_id = db.create_publish_version(
             conn, version_code, "staging", batch_id,
             metadata_json=pv_metadata,
         )
 
-        # Step 2: Insert raw documents
+        # Build set of document_keys that produced segments (i.e., were parsed)
+        parsed_doc_keys: set[str] = set()
+        for seg in segments:
+            parsed_doc_keys.add(seg.document_key)
+
+        # Step 2: Insert raw documents with proper processing_profile
         doc_ids: dict[str, str] = {}
         for doc in documents:
             processing_profile: dict[str, Any] = {}
             if doc.file_type not in ("markdown", "txt"):
                 processing_profile["parse_status"] = "skipped"
                 processing_profile["skip_reason"] = f"unsupported file_type: {doc.file_type}"
+            elif doc.relative_path in parsed_doc_keys:
+                processing_profile["parse_status"] = "parsed"
+            else:
+                processing_profile["parse_status"] = "skipped"
+                processing_profile["skip_reason"] = "no segments produced"
+
+            # Merge with any existing profile from doc
+            if doc.processing_profile_json:
+                merged = {**doc.processing_profile_json, **processing_profile}
+            else:
+                merged = processing_profile
 
             doc_id = db.insert_raw_document(
                 conn,
@@ -91,7 +128,7 @@ def publish(
                 scope_json=doc.scope_json,
                 tags_json=doc.tags_json,
                 structure_quality=doc.structure_quality,
-                processing_profile_json=doc.processing_profile_json or processing_profile,
+                processing_profile_json=merged,
                 metadata_json=doc.metadata_json,
             )
             doc_ids[doc.relative_path] = doc_id
@@ -171,7 +208,8 @@ def publish(
                 "errors": errors,
             }
 
-        # Step 7: Atomic activate
+        # Step 7: Atomic activate — archive old active + activate new + metadata
+        # All in one commit so old active is never lost on failure
         db.activate_version(conn, pv_id)
         pv_metadata["finished_at"] = datetime.now().isoformat()
         pv_metadata["stats"] = {
@@ -229,16 +267,35 @@ def _validate(conn, pv_id: str) -> list[str]:
     if count == 0:
         errors.append("no canonical_segments in version")
 
-    # Every canonical has exactly 1 primary source
+    # Every canonical has exactly 1 primary source (LEFT JOIN catches zero-primary)
     rows = conn.execute(
-        """SELECT canonical_segment_id, COUNT(*) as cnt
-           FROM asset_canonical_segment_sources
-           WHERE publish_version_id = ? AND is_primary = 1
-           GROUP BY canonical_segment_id
-           HAVING cnt != 1""",
-        (pv_id,),
+        """SELECT cs.id
+           FROM asset_canonical_segments cs
+           LEFT JOIN asset_canonical_segment_sources src
+             ON cs.id = src.canonical_segment_id
+             AND src.is_primary = 1
+             AND src.publish_version_id = ?
+           WHERE cs.publish_version_id = ?
+           GROUP BY cs.id
+           HAVING COUNT(src.id) != 1""",
+        (pv_id, pv_id),
     ).fetchall()
     if rows:
         errors.append(f"canonicals with != 1 primary source: {len(rows)}")
+
+    # Every canonical has at least 1 source mapping
+    rows = conn.execute(
+        """SELECT cs.id
+           FROM asset_canonical_segments cs
+           LEFT JOIN asset_canonical_segment_sources src
+             ON cs.id = src.canonical_segment_id
+             AND src.publish_version_id = ?
+           WHERE cs.publish_version_id = ?
+           GROUP BY cs.id
+           HAVING COUNT(src.id) < 1""",
+        (pv_id, pv_id),
+    ).fetchall()
+    if rows:
+        errors.append(f"canonicals with no source mappings: {len(rows)}")
 
     return errors

@@ -67,10 +67,12 @@ def run_pipeline(
             # Passthrough (html/pdf/doc/docx) — no segments
             continue
 
+        parser_name = "markdown" if file_type == "markdown" else "txt" if file_type == "txt" else "unknown"
         segments = segment_document(
             doc_root, profile,
             role_classifier=classifier,
             entity_extractor=extractor,
+            parser_name=parser_name,
         )
         all_segments.extend(segments)
 
