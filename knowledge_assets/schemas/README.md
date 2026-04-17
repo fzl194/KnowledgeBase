@@ -114,13 +114,17 @@ M1 可先全量物理快照，不要求本轮实现未变化文档复制；`copi
 
 ```json
 {
-  "product": "CloudCore",
-  "product_version": "V100R023",
+  "products": ["CloudCore"],
+  "product_versions": ["V100R023"],
   "network_elements": ["SMF", "UPF"],
-  "project": "项目A",
-  "scenario": "N4 interface"
+  "projects": ["项目A"],
+  "domains": [],
+  "scenarios": ["N4 interface"],
+  "authors": []
 }
 ```
+
+M1 统一约定：Mining 写入时优先使用 plural 数组字段；Serving 读取时必须兼容历史或上游可能出现的 singular 字段，例如 `product/product_version/project/domain/scenario/author`。Serving 不得因为某个 scope 子字段缺失就判定文档不可检索；scope 是过滤和排序增强信号，不是基础召回的唯一前提。
 
 `source_uri` 和 `relative_path` 的区别：
 
@@ -166,11 +170,13 @@ concept / parameter / example / note / procedure_step / troubleshooting_step / c
 
 ```json
 [
-  {"type": "command", "name": "ADD APN"},
-  {"type": "network_element", "name": "SMF"},
-  {"type": "term", "name": "DNN"}
+  {"type": "command", "name": "ADD APN", "normalized_name": "ADD APN"},
+  {"type": "network_element", "name": "SMF", "normalized_name": "SMF"},
+  {"type": "term", "name": "DNN", "normalized_name": "dnn"}
 ]
 ```
+
+`normalized_name` 推荐由 Mining 写入，但 Serving 读取时不得强依赖。若缺失，Serving 应使用 `name` 做轻量归一化后匹配；若 `entity_refs_json` 整体为空，Serving 仍应退回 `search_text/canonical_text/title/keywords` 等文本召回。
 
 `structure_json` 最低约定：
 
@@ -181,6 +187,46 @@ concept / parameter / example / note / procedure_step / troubleshooting_step / c
 | `table` | `{"columns": [...], "rows": [...], "row_count": 2, "col_count": 2}` |
 | `code` | `{"language": "mml"}` |
 | `html_table` | `{"raw_html_preserved": true, "row_count": 3, "col_count": 2}` |
+
+更完整的 Markdown table 建议格式：
+
+```json
+{
+  "kind": "markdown_table",
+  "columns": ["参数标识", "参数名称", "参数说明"],
+  "rows": [
+    {
+      "参数标识": "APNNAME",
+      "参数名称": "APN 名称",
+      "参数说明": "必选参数。指定 APN 标识。"
+    }
+  ],
+  "row_count": 1,
+  "col_count": 3
+}
+```
+
+Serving 必须把 `structure_json` 作为 evidence 的一部分原样返回给 Agent；没有结构时返回空对象，不阻断检索。
+
+`source_offsets_json` 最低约定：
+
+```json
+{
+  "parser": "markdown",
+  "block_index": 3,
+  "line_start": 7,
+  "line_end": 11
+}
+```
+
+如果 parser 能提供字符偏移，可追加：
+
+```json
+{
+  "char_start": 120,
+  "char_end": 260
+}
+```
 
 ## canonical_segments
 
@@ -284,6 +330,18 @@ active publish_version
 ```
 
 Serving 不读取文件系统，不依赖 `source_uri` 打开原文件；Serving 只读 DB 中已经发布的 `canonical_text/raw_text/structure_json/source_offsets_json/relative_path`。
+
+Serving 读取 JSON 字段时遵守容错原则：
+
+| 字段 | Serving 读取规则 |
+|---|---|
+| `scope_json` | 兼容 plural/singular；缺失字段不阻断基础召回，只影响 scope 过滤和排序。 |
+| `entity_refs_json` | 优先按 `type + normalized_name` 匹配；`normalized_name` 缺失时 fallback 到 `name`。 |
+| `structure_json` | 原样返回给 Agent；缺失时返回 `{}`。 |
+| `source_offsets_json` | 原样返回给 Agent；缺失时返回 `{}`。 |
+| `processing_profile_json` | 用于来源解释和质量提示，不作为检索硬依赖。 |
+
+当 `relation_type = 'scope_variant'` 且查询 scope 不充分时，该来源应进入 variants/gaps，而不是普通 evidence。`relation_type = 'conflict_candidate'` 永远不能进入普通 evidence，只能进入 conflicts。
 
 ## M1 边界
 

@@ -1,9 +1,15 @@
 # 知识挖掘与 Agent 服务并行开发设计
 
-> 版本：v0.3
+> 版本：v0.4
 > 日期：2026-04-17
 > 作者：Codex
 > 面向对象：后续两个 Claude Code 并行开发任务
+
+## 0. 修订说明
+
+| 日期 | 版本 | 来源 | 说明 |
+|---|---|---|---|
+| 2026-04-17 | v0.4 | Codex / 管理员讨论 | 统一 M1 Mining / Serving 的 JSON 契约和运行态读取原则：Mining 尽量抽取结构化信息，Serving 灵活读取且不得强依赖 JSON 必含字段，不修改全局表结构。 |
 
 ## 1. 背景
 
@@ -178,6 +184,123 @@ Agent/Skill 请求 -> 查询约束识别
 批量归并
 重新生成 canonical segment
 写入 asset.* 知识资产表
+```
+
+## 7.1 M1 统一契约：结构化尽力写入，运行态容错读取
+
+本节是 M1 当前有效口径，优先级高于早期“命令查询”描述。
+
+M1 不再把目标限定为“命令查询”。M1 的共同目标是：
+
+```text
+普通语料文件夹
+  -> Mining 尽力抽取结构化 raw/canonical 资产
+  -> Serving 基于 active version 灵活检索和下钻
+  -> Agent 获得 evidence pack，而不是裸文本或最终答案
+```
+
+两边不能过分依赖对方实现：
+
+| 方向 | 约束 |
+|---|---|
+| Mining -> Serving | 只通过数据库表和 JSON 字段语义对接，不 import Serving，不按 Serving 某个函数定制输出。 |
+| Serving -> Mining | 只读 active 数据库资产，不 import Mining，不假设 Mining 一定写满所有 JSON 子字段。 |
+
+### 7.1.1 Mining 写入原则
+
+Mining 侧应尽可能把可从文档中稳定获得的信息结构化写入，但不能为了满足某个查询场景而造专用列或恢复命令专用模型。
+
+| 字段 | Mining 应写入什么 |
+|---|---|
+| `raw_documents.scope_json` | 文档适用上下文，统一建议使用数组字段：`products/product_versions/network_elements/projects/domains/scenarios/authors`。 |
+| `raw_documents.processing_profile_json` | 文件级处理状态：`parse_status/parser/skip_reason/errors/quality`。 |
+| `raw_segments.structure_json` | 片段内部结构：table columns/rows、list items、code language、html_table 摘要。 |
+| `raw_segments.source_offsets_json` | 来源定位：parser、block_index、line_start、line_end，能拿到时加 char_start/char_end。 |
+| `raw_segments.entity_refs_json` | 从片段中识别出的实体：command、parameter、network_element、term、feature、alarm 等。`normalized_name` 推荐写，但不是 Serving 检索硬前提。 |
+| `canonical_segments.scope_json` | 来源文档 scope 的聚合 union。 |
+| `canonical_segments.entity_refs_json` | 来源 raw segment 实体的去重聚合。 |
+| `canonical_segment_sources.metadata_json` | L1-L0 关系差异，例如 `variant_dimensions/primary_scope/source_scope/conflict_reason`。 |
+
+Mining 必须尽力抽取结构化信息，用于支持不同意图检索：
+
+| 意图 | Mining 支撑信息 |
+|---|---|
+| 参数查询 | table rows、parameter entity、semantic_role=parameter |
+| 示例查询 | code/list/paragraph block、semantic_role=example |
+| 流程查询 | list/paragraph block、semantic_role=procedure_step |
+| 故障查询 | alarm entity、semantic_role=troubleshooting_step/alarm |
+| 概念查询 | term/feature entity、semantic_role=concept |
+| 版本/范围差异 | scope_json、scope_variant、variant_dimensions |
+| 冲突提示 | conflict_candidate、diff_summary、conflict metadata |
+
+### 7.1.2 Serving 读取原则
+
+Serving 侧必须灵活读取，不能把 JSON 子字段当作硬依赖。查询时不能说“必须存在 `normalized_name` / `products` / `structure_json.columns` 才能检索”。这些字段是增强信号，不是唯一入口。
+
+Serving 的检索顺序建议为：
+
+```text
+1. 读取唯一 active publish_version。
+2. 使用 search_text / canonical_text / title / keywords 做基础召回。
+3. 有 entity_refs_json 时用于增强过滤和排序；没有时退回文本匹配。
+4. 有 scope_json 时用于过滤、变体选择和排序；没有时不直接判定不可用。
+5. 有 semantic_role/block_type 时用于排序或意图匹配；没有时保留候选但降低权重。
+6. 下钻 raw_segments 时原样返回 structure_json/source_offsets_json；没有时返回空对象。
+7. conflict_candidate 永远不进入普通 evidence。
+8. scope_variant 在 scope 不充分时进入 variants/gaps，不应混入普通 evidence。
+```
+
+Serving 需要兼容 JSON 形态差异：
+
+| 字段 | 兼容要求 |
+|---|---|
+| `scope_json` | 推荐 plural 数组；读取时兼容 `product/products`、`product_version/product_versions`、`project/projects`、`domain/domains`。 |
+| `entity_refs_json` | 推荐 `type/name/normalized_name`；读取时 `normalized_name` 缺失则用 `name` 归一化匹配。 |
+| `structure_json` | 有 table/list/code 结构则传给 Agent；没有则不阻断检索。 |
+| `source_offsets_json` | 有定位则返回；没有则只返回 section_path/relative_path。 |
+| `processing_profile_json` | 用于来源解释和质量提示；不作为检索硬前提。 |
+
+### 7.1.3 不改表的原因
+
+当前六张表已经足够支撑 M1：
+
+```text
+source_batches
+publish_versions
+raw_documents
+raw_segments
+canonical_segments
+canonical_segment_sources
+```
+
+本轮不新增列、不删列、不新增表。问题主要通过以下方式解决：
+
+| 问题 | 解决位置 |
+|---|---|
+| 表格/list/code 结构保真 | Mining 写 `raw_segments.structure_json`；Serving 原样返回。 |
+| 来源定位 | Mining 写 `source_offsets_json`；Serving 原样返回。 |
+| JSON 子字段不稳定 | Serving 解析兼容 singular/plural 和缺失字段。 |
+| 多意图检索 | Mining 尽力写 entity/semantic/block；Serving 多信号召回和排序。 |
+| 变体和冲突 | L2 relation_type + metadata_json 表达，Serving 分离 evidence/variants/conflicts。 |
+
+### 7.1.4 M1 成功标准
+
+M1 成功不是自然语言理解完全泛化，而是数据生产和证据读取闭环稳定：
+
+```text
+Mining:
+  文件发现完整
+  raw_documents 登记完整
+  MD/TXT raw_segments 结构保真
+  canonical 去重和 L2 映射正确
+  active version 发布可靠
+
+Serving:
+  可读取 Mining 生成的 SQLite DB
+  可从 active canonical 召回
+  不强依赖 JSON 子字段必有
+  可下钻 raw evidence
+  可返回 structure/source/conflict/variant/gap
 ```
 
 ## 8. 并行任务拆分
