@@ -32,10 +32,10 @@ COMMAND_RE = re.compile(
 )
 
 PRODUCT_RE = re.compile(
-    r"\b(UDG|UNC|UPF|AMF|SMF|PCF|UDM|NRF|AUSF|BSF|NSSF)\b", re.IGNORECASE
+    r"\b(UDG|UNC|CloudCore)\b", re.IGNORECASE
 )
 
-VERSION_RE = re.compile(r"\b(V\d{3}R\d{3}C\d{2})\b")
+VERSION_RE = re.compile(r"\b(V\d{3}R\d{3}(C\d{2})?)\b")
 
 NE_RE = re.compile(
     r"\b(AMF|SMF|UPF|UDM|PCF|NRF|AUSF|BSF|NSSF|SCP|UDSF|UDR)\b", re.IGNORECASE
@@ -110,7 +110,7 @@ class QueryNormalizer:
 
         for m in NE_RE.finditer(query):
             ne = m.group(1).upper()
-            if ne not in products and ne not in network_elements:
+            if ne not in network_elements:
                 network_elements.append(ne)
 
         return QueryScope(

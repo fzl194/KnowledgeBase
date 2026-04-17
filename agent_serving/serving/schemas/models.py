@@ -2,6 +2,9 @@
 
 v0.5 schema uses entity_refs_json / scope_json / block_type / semantic_role
 instead of command-centric fixed fields. Models below reflect this.
+
+JSON tolerance: all JSON-derived fields default to empty — missing data
+doesn't block retrieval, only affects filtering/sorting.
 """
 from __future__ import annotations
 
@@ -12,6 +15,9 @@ from pydantic import BaseModel, Field
 
 class SearchRequest(BaseModel):
     query: str
+    scope: QueryScope | None = None  # forward ref resolved below
+    entities: list[EntityRef] | None = None
+    debug: bool = False
 
 
 class CommandUsageRequest(BaseModel):
@@ -22,7 +28,7 @@ class CommandUsageRequest(BaseModel):
 
 class EntityRef(BaseModel):
     """A single entity extracted from the query."""
-    type: str  # command, feature, term, alarm, network_element, etc.
+    type: str = ""  # command, feature, term, alarm, network_element, etc.
     name: str
     normalized_name: str = ""
 
@@ -37,7 +43,7 @@ class QueryScope(BaseModel):
 
 
 class NormalizedQuery(BaseModel):
-    intent: str = "general"  # command_usage, concept_lookup, troubleshooting, comparison, procedure, general
+    intent: str = "general"
     entities: list[EntityRef] = Field(default_factory=list)
     scope: QueryScope = Field(default_factory=QueryScope)
     keywords: list[str] = Field(default_factory=list)
@@ -66,7 +72,7 @@ class QueryPlan(BaseModel):
     scope_constraints: QueryScope = Field(default_factory=QueryScope)
     semantic_role_preferences: list[str] = Field(default_factory=list)
     block_type_preferences: list[str] = Field(default_factory=list)
-    variant_policy: str = "flag"  # flag, allow, require_disambiguation
+    variant_policy: str = "flag"
     conflict_policy: str = "flag_not_answer"
     evidence_budget: EvidenceBudget = Field(default_factory=EvidenceBudget)
     expansion: ExpansionConfig = Field(default_factory=ExpansionConfig)
@@ -98,6 +104,8 @@ class EvidenceItem(BaseModel):
     section_path: list[str] = Field(default_factory=list)
     section_title: str | None = None
     entity_refs: list[EntityRef] = Field(default_factory=list)
+    structure: dict = Field(default_factory=dict)
+    source_offsets: dict = Field(default_factory=dict)
 
 
 class SourceRef(BaseModel):
@@ -106,18 +114,35 @@ class SourceRef(BaseModel):
     section_path: list[str] = Field(default_factory=list)
     block_type: str | None = None
     scope: QueryScope = Field(default_factory=QueryScope)
+    file_type: str | None = None
+    document_type: str | None = None
+    tags: list[str] = Field(default_factory=list)
 
 
 class VariantInfo(BaseModel):
     raw_segment_id: str
-    relation_type: str  # scope_variant, near_duplicate
+    relation_type: str
     diff_summary: str | None = None
     scope: QueryScope = Field(default_factory=QueryScope)
 
 
 class ConflictInfo(BaseModel):
+    raw_segment_id: str | None = None
+    relation_type: str | None = None
     raw_text: str
     diff_summary: str | None = None
+    scope: QueryScope = Field(default_factory=QueryScope)
+    entity_refs: list[EntityRef] = Field(default_factory=list)
+    source: SourceRef | None = None
+    section_path: list[str] = Field(default_factory=list)
+
+
+class UnparsedDocument(BaseModel):
+    id: str
+    document_key: str
+    relative_path: str | None = None
+    file_type: str | None = None
+    document_type: str | None = None
     scope: QueryScope = Field(default_factory=QueryScope)
 
 
@@ -141,4 +166,9 @@ class EvidencePack(BaseModel):
     conflicts: list[ConflictInfo] = Field(default_factory=list)
     gaps: list[Gap] = Field(default_factory=list)
     suggested_followups: list[str] = Field(default_factory=list)
+    unparsed_documents: list[UnparsedDocument] = Field(default_factory=list)
     debug_trace: dict | None = None
+
+
+# Fix forward references
+SearchRequest.model_rebuild()

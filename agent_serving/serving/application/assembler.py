@@ -18,6 +18,7 @@ from agent_serving.serving.schemas.models import (
     QueryPlan,
     QueryScope,
     SourceRef,
+    UnparsedDocument,
     VariantInfo,
 )
 
@@ -32,11 +33,13 @@ class EvidenceAssembler:
         plan: QueryPlan,
         canonical_hits: list[dict],
         drill_results: list[tuple[list[dict], list[dict], list[dict]]],
+        unparsed_docs: list[dict] | None = None,
     ) -> EvidencePack:
         """Assemble EvidencePack from drill-down results.
 
         drill_results is a list of (evidence, variants, conflicts) tuples,
         one per canonical hit.
+        unparsed_docs: documents registered but not parsed into segments.
         """
         # Build canonical items
         canonical_items = [
@@ -68,6 +71,9 @@ class EvidenceAssembler:
         # Build followups
         followups = self._build_followups(gaps, conflicts)
 
+        # Build unparsed documents
+        unparsed_items = self._build_unparsed_docs(unparsed_docs or [])
+
         return EvidencePack(
             query=query,
             intent=intent,
@@ -82,6 +88,7 @@ class EvidenceAssembler:
             conflicts=conflicts,
             gaps=gaps,
             suggested_followups=followups,
+            unparsed_documents=unparsed_items,
         )
 
     def _build_canonical_item(self, h: dict) -> CanonicalItem:
@@ -105,6 +112,8 @@ class EvidenceAssembler:
 
     def _build_evidence_item(self, r: dict) -> EvidenceItem:
         entity_refs = _parse_entity_refs(r.get("entity_refs_json", "[]"))
+        structure = _parse_json_dict(r.get("structure_json", "{}"))
+        source_offsets = _parse_json_dict(r.get("source_offsets_json", "{}"))
 
         return EvidenceItem(
             id=str(r["id"]),
@@ -114,10 +123,13 @@ class EvidenceAssembler:
             section_path=_parse_section_path(r.get("section_path", "[]")),
             section_title=r.get("section_title"),
             entity_refs=entity_refs,
+            structure=structure,
+            source_offsets=source_offsets,
         )
 
     def _build_source(self, r: dict) -> SourceRef:
         scope = _parse_scope(r.get("doc_scope_json", "{}"))
+        tags = _parse_json_list(r.get("tags_json", "[]"))
 
         return SourceRef(
             document_key=r.get("document_key", ""),
@@ -125,6 +137,9 @@ class EvidenceAssembler:
             section_path=_parse_section_path(r.get("section_path", "[]")),
             block_type=r.get("block_type"),
             scope=scope,
+            file_type=r.get("file_type"),
+            document_type=r.get("document_type"),
+            tags=tags,
         )
 
     def _build_variant(self, r: dict) -> VariantInfo:
@@ -139,11 +154,25 @@ class EvidenceAssembler:
 
     def _build_conflict(self, r: dict) -> ConflictInfo:
         scope = _parse_scope(r.get("doc_scope_json", "{}"))
+        entity_refs = _parse_entity_refs(r.get("entity_refs_json", "[]"))
+        source = SourceRef(
+            document_key=r.get("document_key", ""),
+            relative_path=r.get("relative_path"),
+            section_path=_parse_section_path(r.get("section_path", "[]")),
+            scope=scope,
+            file_type=r.get("file_type"),
+            document_type=r.get("document_type"),
+        )
 
         return ConflictInfo(
+            raw_segment_id=str(r.get("id", "")) or None,
+            relation_type=r.get("relation_type"),
             raw_text=r.get("raw_text", ""),
             diff_summary=r.get("diff_summary"),
             scope=scope,
+            entity_refs=entity_refs,
+            source=source,
+            section_path=_parse_section_path(r.get("section_path", "[]")),
         )
 
     def _build_gaps(
@@ -249,8 +278,43 @@ class EvidenceAssembler:
         parts.extend(normalized.keywords)
         return " ".join(parts)
 
+    def _build_unparsed_docs(self, raw_docs: list[dict]) -> list[UnparsedDocument]:
+        items: list[UnparsedDocument] = []
+        for doc in raw_docs:
+            scope = _parse_scope(doc.get("scope_json", "{}"))
+            items.append(UnparsedDocument(
+                id=str(doc["id"]),
+                document_key=doc.get("document_key", ""),
+                relative_path=doc.get("relative_path"),
+                file_type=doc.get("file_type"),
+                document_type=doc.get("document_type"),
+                scope=scope,
+            ))
+        return items
+
 
 # --- JSON helpers ---
+
+def _parse_json_dict(raw: str | dict) -> dict:
+    if isinstance(raw, dict):
+        return raw
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def _parse_json_list(raw: str | list) -> list[str]:
+    if isinstance(raw, list):
+        return raw
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return parsed
+        return []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
 
 def _parse_section_path(raw: str | list) -> list[str]:
     if isinstance(raw, list):
@@ -297,10 +361,25 @@ def _parse_scope(raw: str | dict) -> QueryScope:
             return QueryScope()
     if not isinstance(d, dict):
         return QueryScope()
+
+    def _get_list(key: str) -> list[str]:
+        val = d.get(key)
+        if val is None:
+            # Try singular fallback
+            singular = key.rstrip("s")
+            val = d.get(singular)
+        if val is None:
+            return []
+        if isinstance(val, str):
+            return [val]
+        if isinstance(val, list):
+            return val
+        return []
+
     return QueryScope(
-        products=d.get("products", []),
-        product_versions=d.get("product_versions", []),
-        network_elements=d.get("network_elements", []),
-        projects=d.get("projects", []),
-        domains=d.get("domains", []),
+        products=_get_list("products"),
+        product_versions=_get_list("product_versions"),
+        network_elements=_get_list("network_elements"),
+        projects=_get_list("projects"),
+        domains=_get_list("domains"),
     )

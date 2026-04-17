@@ -1,8 +1,7 @@
 """Search API — unified QueryPlan pipeline for generic evidence retrieval.
 
-/search is the main entry. /command-usage is a compatible shortcut that
-forces intent=command_usage and uses entity.type=command, but otherwise
-walks the same pipeline as /search.
+/search is the main entry. /command-usage is a compatible shortcut.
+Explicit request scope/entities take priority over normalizer extraction.
 """
 from __future__ import annotations
 
@@ -14,6 +13,7 @@ from agent_serving.serving.schemas.models import (
     EvidencePack,
     NormalizedQuery,
     QueryPlan,
+    QueryScope,
     SearchRequest,
 )
 from agent_serving.serving.repositories.asset_repo import AssetRepository
@@ -27,19 +27,41 @@ def get_repo(request: Request) -> AssetRepository:
     return AssetRepository(request.app.state.db)
 
 
+def _merge_explicit_overrides(
+    normalized: NormalizedQuery, req_scope: QueryScope | None, req_entities: list[EntityRef] | None,
+) -> NormalizedQuery:
+    """Merge explicit request scope/entities over normalizer extraction."""
+    if req_scope:
+        # Explicit scope overrides normalizer scope
+        normalized.scope = req_scope
+        normalized.missing_constraints = []
+
+    if req_entities:
+        # Explicit entities override normalizer entities
+        normalized.entities = req_entities
+
+    return normalized
+
+
 async def _execute_plan(
     query: str, normalized: NormalizedQuery, plan: QueryPlan, repo: AssetRepository,
 ) -> EvidencePack:
     """Core pipeline: search canonical → drill down → assemble evidence pack."""
     assembler = EvidenceAssembler()
 
+    # Validate active version
+    pv_id, pv_error = await repo.get_active_publish_version_id()
+    if pv_error == "no_active_version":
+        raise HTTPException(status_code=503, detail="No active asset version — knowledge base is empty")
+    if pv_error == "multiple_active_versions":
+        raise HTTPException(status_code=500, detail="Data integrity error: multiple active versions")
+
     # 1. Search L1 canonical segments
-    canonical_hits = await repo.search_canonical(plan)
+    canonical_hits = await repo.search_canonical(plan, pv_id)
 
     # 2. Fallback: if entity search found nothing, try keywords
     if not canonical_hits and plan.keywords:
-        from agent_serving.serving.schemas.models import QueryPlan as QP
-        keyword_plan = QP(
+        keyword_plan = QueryPlan(
             intent=plan.intent,
             retrieval_targets=plan.retrieval_targets,
             entity_constraints=[],
@@ -52,7 +74,7 @@ async def _execute_plan(
             expansion=plan.expansion,
             keywords=plan.keywords,
         )
-        canonical_hits = await repo.search_canonical(keyword_plan)
+        canonical_hits = await repo.search_canonical(keyword_plan, pv_id)
 
     # 3. Drill down for each canonical hit
     drill_results: list[tuple[list[dict], list[dict], list[dict]]] = []
@@ -60,10 +82,14 @@ async def _execute_plan(
         evidence, variants, conflicts = await repo.drill_down(
             canonical_segment_id=canon["id"],
             plan=plan,
+            pv_id=pv_id,
         )
         drill_results.append((evidence, variants, conflicts))
 
-    # 4. Assemble evidence pack
+    # 4. Get unparsed documents for source audit
+    unparsed = await repo.get_unparsed_documents(pv_id)
+
+    # 5. Assemble evidence pack
     pack = assembler.assemble(
         query=query,
         intent=plan.intent,
@@ -71,6 +97,7 @@ async def _execute_plan(
         plan=plan,
         canonical_hits=canonical_hits,
         drill_results=drill_results,
+        unparsed_docs=unparsed,
     )
 
     return pack
@@ -83,6 +110,9 @@ async def search(
 ) -> EvidencePack:
     normalizer = QueryNormalizer()
     normalized = normalizer.normalize(request.query)
+
+    # Merge explicit overrides
+    normalized = _merge_explicit_overrides(normalized, request.scope, request.entities)
     plan = build_plan(normalized)
 
     return await _execute_plan(request.query, normalized, plan, repo)
@@ -93,22 +123,14 @@ async def command_usage(
     request: CommandUsageRequest,
     repo: AssetRepository = Depends(get_repo),
 ) -> EvidencePack:
-    """Compatible shortcut: forces intent=command_usage.
-
-    Internally walks the same QueryPlan pipeline as /search.
-    """
+    """Compatible shortcut: forces intent=command_usage."""
     normalizer = QueryNormalizer()
     normalized = normalizer.normalize(request.query)
 
-    # Force intent to command_usage
     has_command = any(e.type == "command" for e in normalized.entities)
     if not has_command:
-        raise HTTPException(
-            status_code=400,
-            detail="Could not identify a command in the query",
-        )
+        raise HTTPException(status_code=400, detail="Could not identify a command in the query")
 
-    # Override intent for command-usage shortcut
     normalized.intent = "command_usage"
     normalized.desired_semantic_roles = ["parameter", "example", "procedure_step"]
 

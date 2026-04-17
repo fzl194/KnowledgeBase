@@ -2,7 +2,11 @@
 
 All queries enforce publish_version_id = active version per schema README.
 Uses QueryPlan for search — no command-specific SQL paths.
-Document-level scope is read from raw_documents.scope_json (v0.5).
+
+JSON tolerance principles:
+- scope_json: compatible with singular (product) and plural (products)
+- entity_refs_json: fallback to name when normalized_name missing
+- Missing JSON fields don't block retrieval, only affect filtering/sorting
 """
 from __future__ import annotations
 
@@ -18,12 +22,44 @@ class AssetRepository:
     def __init__(self, db: aiosqlite.Connection) -> None:
         self._db = db
 
-    async def get_active_publish_version_id(self) -> str | None:
+    async def get_active_publish_version_id(self) -> tuple[str | None, str | None]:
+        """Get active publish version ID with validation.
+
+        Returns (pv_id, error_message).
+        - (id, None) — exactly 1 active
+        - (None, "no_active_version") — 0 active
+        - (None, "multiple_active_versions") — >1 active (data integrity issue)
+        """
         cursor = await self._db.execute(
-            "SELECT id FROM asset_publish_versions WHERE status = 'active' LIMIT 1"
+            "SELECT id FROM asset_publish_versions WHERE status = 'active'"
         )
-        row = await cursor.fetchone()
-        return row["id"] if row else None
+        rows = await cursor.fetchall()
+        if len(rows) == 0:
+            return None, "no_active_version"
+        if len(rows) > 1:
+            return None, "multiple_active_versions"
+        return rows[0]["id"], None
+
+    async def get_unparsed_documents(
+        self, pv_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Get documents registered but not parsed into segments."""
+        if pv_id is None:
+            pv_id, _ = await self.get_active_publish_version_id()
+        if pv_id is None:
+            return []
+
+        cursor = await self._db.execute(
+            "SELECT rd.id, rd.document_key, rd.relative_path, rd.file_type, "
+            "  rd.document_type, rd.scope_json, rd.tags_json "
+            "FROM asset_raw_documents rd "
+            "WHERE rd.publish_version_id = ? "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM asset_raw_segments rs WHERE rs.raw_document_id = rd.id"
+            ")",
+            (pv_id,),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
 
     async def search_canonical(
         self, plan: QueryPlan, pv_id: str | None = None,
@@ -31,13 +67,13 @@ class AssetRepository:
         """Search canonical segments based on QueryPlan.
 
         Strategy: search_text LIKE recall, then Python-side JSON filtering.
+        Falls back to canonical_text/title when entity_refs is empty.
         """
         if pv_id is None:
-            pv_id = await self.get_active_publish_version_id()
+            pv_id, _ = await self.get_active_publish_version_id()
         if pv_id is None:
             return []
 
-        # Build WHERE clause for text recall
         conditions = ["cs.publish_version_id = ?"]
         params: list[Any] = [pv_id]
 
@@ -61,12 +97,18 @@ class AssetRepository:
         rows = await cursor.fetchall()
         results = [dict(row) for row in rows]
 
-        # Python-side JSON filtering for entity_refs and scope
+        # Python-side JSON filtering — only when entity_refs has data
         if plan.entity_constraints:
-            results = self._filter_by_entities(results, plan.entity_constraints)
+            entity_filtered = self._filter_by_entities(results, plan.entity_constraints)
+            # If entity filtering drops everything, fall back to text-only results
+            if entity_filtered:
+                results = entity_filtered
 
         if plan.semantic_role_preferences:
-            results = self._filter_by_semantic_roles(results, plan.semantic_role_preferences)
+            results = self._sort_by_semantic_roles(results, plan.semantic_role_preferences)
+
+        if plan.block_type_preferences:
+            results = self._sort_by_block_types(results, plan.block_type_preferences)
 
         return results
 
@@ -79,17 +121,23 @@ class AssetRepository:
         """Drill down from canonical to raw evidence.
 
         Returns (evidence_rows, variant_rows, conflict_rows) separately.
+        scope_variant: only enters evidence when scope is sufficient AND matches.
+        conflict_candidate: always goes to conflicts, never evidence.
         """
         if pv_id is None:
-            pv_id = await self.get_active_publish_version_id()
+            pv_id, _ = await self.get_active_publish_version_id()
         if pv_id is None:
             return [], [], []
 
         query = (
             "SELECT rs.id, rs.block_type, rs.semantic_role, rs.raw_text, "
             "  rs.section_path, rs.section_title, rs.entity_refs_json, "
-            "  rd.document_key, rd.relative_path, rd.scope_json AS doc_scope_json, "
-            "  csources.relation_type, csources.diff_summary, csources.metadata_json AS source_metadata "
+            "  rs.structure_json, rs.source_offsets_json, "
+            "  rd.document_key, rd.relative_path, rd.file_type, "
+            "  rd.document_type, rd.scope_json AS doc_scope_json, "
+            "  rd.tags_json, rd.processing_profile_json, "
+            "  csources.relation_type, csources.diff_summary, "
+            "  csources.metadata_json AS source_metadata "
             "FROM asset_canonical_segment_sources csources "
             "JOIN asset_raw_segments rs ON csources.raw_segment_id = rs.id "
             "JOIN asset_raw_documents rd ON rs.raw_document_id = rd.id "
@@ -104,6 +152,8 @@ class AssetRepository:
         variants: list[dict[str, Any]] = []
         conflicts: list[dict[str, Any]] = []
 
+        scope_sufficient = self._scope_is_sufficient(plan.scope_constraints)
+
         for row in rows:
             r = dict(row)
             rel_type = r["relation_type"]
@@ -111,8 +161,7 @@ class AssetRepository:
             if rel_type == "conflict_candidate":
                 conflicts.append(r)
             elif rel_type == "scope_variant":
-                # Apply scope filtering if constraints present
-                if self._matches_scope(r, plan.scope_constraints):
+                if scope_sufficient and self._matches_scope(r, plan.scope_constraints):
                     evidence.append(r)
                 else:
                     variants.append(r)
@@ -123,7 +172,6 @@ class AssetRepository:
                 else:
                     variants.append(r)
 
-        # Limit evidence per canonical
         limit = plan.evidence_budget.raw_per_canonical
         if len(evidence) > limit:
             evidence = evidence[:limit]
@@ -135,13 +183,14 @@ class AssetRepository:
     ) -> list[dict[str, Any]]:
         """Get conflict candidates for a canonical segment."""
         if pv_id is None:
-            pv_id = await self.get_active_publish_version_id()
+            pv_id, _ = await self.get_active_publish_version_id()
         if pv_id is None:
             return []
 
         cursor = await self._db.execute(
-            "SELECT rs.raw_text, rs.entity_refs_json, "
-            "  rd.scope_json AS doc_scope_json, "
+            "SELECT rs.id, rs.raw_text, rs.entity_refs_json, "
+            "  rs.section_path, rs.section_title, "
+            "  rd.document_key, rd.relative_path, rd.scope_json AS doc_scope_json, "
             "  csources.relation_type, csources.diff_summary "
             "FROM asset_canonical_segment_sources csources "
             "JOIN asset_raw_segments rs ON csources.raw_segment_id = rs.id "
@@ -151,15 +200,19 @@ class AssetRepository:
             "AND csources.relation_type = 'conflict_candidate'",
             (canonical_segment_id, pv_id),
         )
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict(row) for row in await cursor.fetchall()]
 
     # --- Private helpers ---
 
     def _filter_by_entities(
         self, results: list[dict], entity_constraints: list,
     ) -> list[dict]:
-        """Filter canonical results by entity_refs_json match."""
+        """Filter canonical results by entity_refs_json match.
+
+        Falls back to name comparison when normalized_name is missing.
+        Returns empty list if no entity_refs match — caller decides whether
+        to use text-only fallback.
+        """
         if not entity_constraints:
             return results
 
@@ -170,42 +223,72 @@ class AssetRepository:
             except (json.JSONDecodeError, TypeError):
                 refs = []
 
+            if not refs:
+                # entity_refs empty — can't filter, skip this result
+                continue
+
             for constraint in entity_constraints:
+                matched = False
                 for ref in refs:
-                    if (ref.get("type") == constraint.type
-                            and ref.get("normalized_name", "").lower()
-                            == constraint.normalized_name.lower()):
-                        filtered.append(r)
+                    # Type match
+                    ref_type = ref.get("type", "")
+                    if ref_type and ref_type != constraint.type:
+                        continue
+                    # Name match: prefer normalized_name, fallback to name
+                    ref_name = (ref.get("normalized_name") or ref.get("name", "")).lower()
+                    constraint_name = (constraint.normalized_name or constraint.name).lower()
+                    if ref_name == constraint_name:
+                        matched = True
                         break
-                else:
-                    continue
-                break
+                if matched:
+                    filtered.append(r)
+                    break
 
         return filtered
 
-    def _filter_by_semantic_roles(
+    def _sort_by_semantic_roles(
         self, results: list[dict], preferred_roles: list[str],
     ) -> list[dict]:
-        """Prefer results matching desired semantic roles but don't exclude others."""
+        """Prefer results matching desired semantic roles, don't exclude others."""
         if not preferred_roles:
             return results
-
-        preferred = []
-        other = []
-        for r in results:
-            if r.get("semantic_role", "unknown") in preferred_roles:
-                preferred.append(r)
-            else:
-                other.append(r)
+        preferred = [r for r in results if r.get("semantic_role", "unknown") in preferred_roles]
+        other = [r for r in results if r.get("semantic_role", "unknown") not in preferred_roles]
         return preferred + other
+
+    def _sort_by_block_types(
+        self, results: list[dict], preferred_types: list[str],
+    ) -> list[dict]:
+        """Prefer results matching desired block types, don't exclude others."""
+        if not preferred_types:
+            return results
+        preferred = [r for r in results if r.get("block_type", "unknown") in preferred_types]
+        other = [r for r in results if r.get("block_type", "unknown") not in preferred_types]
+        return preferred + other
+
+    def _scope_is_sufficient(self, scope: QueryScope) -> bool:
+        """Check if query provides enough scope to resolve variants.
+
+        At minimum: products must be specified for scope_variant resolution.
+        """
+        return bool(scope.products)
 
     def _matches_scope(self, row: dict, scope: QueryScope) -> bool:
         """Check if a raw evidence row matches scope constraints.
 
+        Compatible with singular/plural scope_json.
         If no scope constraints specified, everything matches.
-        Only filters on fields that are constrained.
         """
-        if not scope.products and not scope.product_versions and not scope.network_elements:
+        # Check all scope dimensions — if any is constrained, it must match
+        scope_dims = [
+            ("products", scope.products),
+            ("product_versions", scope.product_versions),
+            ("network_elements", scope.network_elements),
+            ("projects", scope.projects),
+            ("domains", scope.domains),
+        ]
+        has_any_constraint = any(v for _, v in scope_dims)
+        if not has_any_constraint:
             return True
 
         try:
@@ -213,19 +296,23 @@ class AssetRepository:
         except (json.JSONDecodeError, TypeError):
             doc_scope = {}
 
-        if scope.products:
-            doc_products = doc_scope.get("products", [])
-            if not any(p in doc_products for p in scope.products):
-                return False
-
-        if scope.product_versions:
-            doc_versions = doc_scope.get("product_versions", [])
-            if not any(v in doc_versions for v in scope.product_versions):
-                return False
-
-        if scope.network_elements:
-            doc_nes = doc_scope.get("network_elements", [])
-            if not any(ne in doc_nes for ne in scope.network_elements):
+        for plural_key, constraint_values in scope_dims:
+            if not constraint_values:
+                continue
+            # Try plural first, then singular
+            doc_values = doc_scope.get(plural_key)
+            if doc_values is None:
+                singular = plural_key.rstrip("s")
+                doc_values = doc_scope.get(singular)
+                if doc_values is None:
+                    # Also try singular without 's' (e.g., scenario -> scenarios)
+                    continue
+            # Normalize to list
+            if isinstance(doc_values, str):
+                doc_values = [doc_values]
+            elif not isinstance(doc_values, list):
+                continue
+            if not any(v in doc_values for v in constraint_values):
                 return False
 
         return True

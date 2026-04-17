@@ -30,7 +30,11 @@ def _make_evidence(**overrides):
         "section_path": json.dumps([{"title": "OM参考", "level": 2}, {"title": "ADD APN", "level": 3}]),
         "section_title": "ADD APN",
         "entity_refs_json": json.dumps([{"type": "command", "name": "ADD APN", "normalized_name": "ADD APN"}]),
+        "structure_json": "{}",
+        "source_offsets_json": "{}",
         "document_key": "UDG_OM_REF", "relative_path": "udg_om.md",
+        "file_type": "markdown", "document_type": "command",
+        "tags_json": json.dumps(["command", "core_network"]),
         "doc_scope_json": json.dumps({"products": ["UDG"], "product_versions": ["V100R023C10"],
                                       "network_elements": ["UDM"], "projects": [], "domains": []}),
         "relation_type": "primary", "diff_summary": None, "source_metadata": "{}",
@@ -171,3 +175,56 @@ def test_assemble_followups_on_conflict():
     )
     assert len(pack.suggested_followups) > 0
     assert any("冲突" in f for f in pack.suggested_followups)
+
+
+def test_assemble_structure_preserved():
+    """structure_json must pass through to EvidenceItem."""
+    asm = EvidenceAssembler()
+    ev = _make_evidence(
+        block_type="table",
+        structure_json=json.dumps({"columns": ["参数", "类型"], "rows": [["APN", "string"]]}),
+        source_offsets_json=json.dumps({"start": 10, "end": 200}),
+    )
+    pack = asm.assemble(
+        query="ADD APN", intent="command_usage",
+        normalized=_make_normalized(),
+        plan=_make_plan(),
+        canonical_hits=[_make_canon()],
+        drill_results=[([ev], [], [])],
+    )
+    assert pack.evidence_items[0].structure["columns"] == ["参数", "类型"]
+    assert pack.evidence_items[0].source_offsets["start"] == 10
+
+
+def test_assemble_unparsed_docs():
+    """Unparsed documents should appear in the pack."""
+    asm = EvidenceAssembler()
+    unparsed = [
+        {"id": "doc-1", "document_key": "SAMPLE_PDF", "relative_path": "sample.pdf",
+         "file_type": "pdf", "document_type": "reference",
+         "scope_json": json.dumps({"products": ["UDG"]})},
+    ]
+    pack = asm.assemble(
+        query="5G是什么", intent="concept_lookup",
+        normalized=_make_normalized(intent="concept_lookup", entities=[], missing_constraints=[]),
+        plan=_make_plan(intent="concept_lookup", entity_constraints=[]),
+        canonical_hits=[], drill_results=[],
+        unparsed_docs=unparsed,
+    )
+    assert len(pack.unparsed_documents) == 1
+    assert pack.unparsed_documents[0].document_key == "SAMPLE_PDF"
+    assert pack.unparsed_documents[0].file_type == "pdf"
+
+
+def test_assemble_source_has_file_type():
+    asm = EvidenceAssembler()
+    pack = asm.assemble(
+        query="ADD APN", intent="command_usage",
+        normalized=_make_normalized(),
+        plan=_make_plan(),
+        canonical_hits=[_make_canon()],
+        drill_results=[([_make_evidence()], [], [])],
+    )
+    assert pack.sources[0].file_type == "markdown"
+    assert pack.sources[0].document_type == "command"
+    assert "command" in pack.sources[0].tags

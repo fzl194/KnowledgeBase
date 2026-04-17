@@ -1,6 +1,12 @@
-"""FastAPI application with SQLite dev mode and DB injection."""
+"""FastAPI application with SQLite dev mode and DB injection.
+
+Supports two modes:
+- Production: COREMASTERKB_ASSET_DB_PATH points to Mining-generated SQLite DB
+- Dev/test: in-memory SQLite with shared DDL (no data by default)
+"""
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 
 import aiosqlite
@@ -11,12 +17,20 @@ from agent_serving.serving.api.search import router as search_router
 from agent_serving.serving.repositories.asset_repo import AssetRepository
 from agent_serving.serving.repositories.schema_adapter import create_asset_tables_sqlite
 
+_DB_PATH_ENV = "COREMASTERKB_ASSET_DB_PATH"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    db = await aiosqlite.connect(":memory:")
+    db_path = os.environ.get(_DB_PATH_ENV)
+    if db_path:
+        # Read-only connection to Mining-generated SQLite DB
+        db = await aiosqlite.connect(f"file:{db_path}?mode=ro", uri=True)
+    else:
+        # Dev/test mode: in-memory with shared DDL
+        db = await aiosqlite.connect(":memory:")
+        await create_asset_tables_sqlite(db)
     db.row_factory = aiosqlite.Row
-    await create_asset_tables_sqlite(db)
     app.state.db = db
     yield
     await db.close()

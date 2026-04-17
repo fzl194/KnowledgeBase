@@ -28,8 +28,9 @@ async def repo(db_connection):
 
 @pytest.mark.asyncio
 async def test_get_active_publish_version_id(repo):
-    pv_id = await repo.get_active_publish_version_id()
+    pv_id, error = await repo.get_active_publish_version_id()
     assert pv_id == ACTIVE_PV_ID
+    assert error is None
 
 
 @pytest.mark.asyncio
@@ -88,13 +89,15 @@ async def test_drill_down_with_scope_filter(repo):
 
 
 @pytest.mark.asyncio
-async def test_drill_down_no_scope_returns_primary_and_variant(repo):
+async def test_drill_down_no_scope_primary_evidence_variants_separated(repo):
+    """Without scope constraints, scope_variant goes to variants (scope insufficient)."""
     plan = _plan()
     evidence, variants, conflicts = await repo.drill_down(
         canonical_segment_id=SEED_IDS["canon_add_apn"],
         plan=plan,
     )
-    assert len(evidence) >= 2
+    assert len(evidence) >= 1  # primary evidence
+    assert len(variants) >= 1  # scope_variant goes to variants when no scope
 
 
 @pytest.mark.asyncio

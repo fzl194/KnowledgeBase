@@ -19,6 +19,9 @@ from agent_serving.serving.schemas.models import (
 def test_search_request_defaults():
     req = SearchRequest(query="ADD APN 怎么写")
     assert req.query == "ADD APN 怎么写"
+    assert req.scope is None
+    assert req.entities is None
+    assert req.debug is False
 
 
 def test_command_usage_request():
@@ -89,3 +92,29 @@ def test_scope_model():
     assert scope.products == ["UDG"]
     assert scope.projects == []
     assert scope.domains == []
+
+
+def test_search_request_with_scope_and_entities():
+    req = SearchRequest(
+        query="ADD APN",
+        scope=QueryScope(products=["UDG"]),
+        entities=[EntityRef(type="command", name="ADD APN")],
+        debug=True,
+    )
+    assert req.scope.products == ["UDG"]
+    assert len(req.entities) == 1
+    assert req.debug is True
+
+
+def test_evidence_item_has_structure():
+    from agent_serving.serving.schemas.models import EvidenceItem
+    item = EvidenceItem(
+        id="rs-1",
+        block_type="table",
+        semantic_role="parameter",
+        raw_text="table content",
+        structure={"columns": ["col1", "col2"], "rows": [["a", "b"]]},
+        source_offsets={"start": 0, "end": 100},
+    )
+    assert item.structure["columns"] == ["col1", "col2"]
+    assert item.source_offsets["start"] == 0

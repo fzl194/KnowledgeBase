@@ -35,8 +35,9 @@ def test_extract_with_network_element(normalizer):
     result = normalizer.normalize("AMF ADD APN 怎么写")
     assert result.intent == "command_usage"
     assert any(e.type == "command" and e.name == "ADD APN" for e in result.entities)
-    # AMF is in both product and NE regex; matched as product first
-    assert "AMF" in result.scope.products
+    # AMF is a network element, not a product
+    assert "AMF" in result.scope.network_elements
+    assert "AMF" not in result.scope.products
 
 
 def test_general_query_no_command(normalizer):
@@ -92,3 +93,19 @@ def test_desired_roles_for_command_usage(normalizer):
 def test_desired_roles_for_troubleshooting(normalizer):
     result = normalizer.normalize("CPU过载告警怎么排查")
     assert "troubleshooting_step" in result.desired_semantic_roles
+
+
+def test_smf_is_network_element_not_product(normalizer):
+    result = normalizer.normalize("SMF 配置 S-NSSAI")
+    assert "SMF" in result.scope.network_elements
+    assert "SMF" not in result.scope.products
+
+
+def test_cloudcore_recognized_as_product(normalizer):
+    result = normalizer.normalize("CloudCore 5G 概念")
+    assert "CLOUDCORE" in result.scope.products
+
+
+def test_version_without_c_match(normalizer):
+    result = normalizer.normalize("UDG V100R023 ADD APN")
+    assert "V100R023" in result.scope.product_versions
