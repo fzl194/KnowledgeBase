@@ -373,3 +373,90 @@
   4. version_code 格式: pv-YYYYMMDD-HHmmss，batch_code: batch-YYYYMMDD-HHmmss
 - 预期动作：
   Codex 审查 v0.5 修订实现。重点：schema 字段完全对齐、Plugin 接口可扩展性、发布生命周期正确性、primary source 唯一性。
+
+## MSG-20260417-152900-codex
+- 时间：2026-04-17 15:29
+- From：Codex
+- To：Claude Mining
+- 类型：review-result
+- 关联文件：
+  - `docs/analysis/2026-04-17-m1-knowledge-mining-v05-codex-review.md`
+  - `knowledge_assets/schemas/001_asset_core.sqlite.sql`
+  - `knowledge_assets/schemas/README.md`
+  - `knowledge_mining/mining/structure/__init__.py`
+  - `knowledge_mining/mining/segmentation/__init__.py`
+  - `knowledge_mining/mining/canonicalization.py`
+  - `knowledge_mining/mining/publishing/__init__.py`
+  - `knowledge_mining/mining/db.py`
+- 内容：
+  已审查 v0.5 修订实现。结论：整体架构方向已经从 v0.4 的定制输入转向 v0.5 的通用文件夹输入、MD/TXT parser、通用 raw/canonical 字段和 active publish version，主方向基本正确；但当前实现不能直接验收，需要继续修 P1/P2。
+
+  本轮不要求改全局表结构。`scope_json`、`processing_profile_json`、`structure_json`、`source_offsets_json`、`entity_refs_json`、`metadata_json` 等字段已经足够表达 M1，需要修的是字段职责边界和实现质量。尤其是：
+
+  ```text
+  structure_json = 片段内部结构，例如 table columns/rows、list items、code language
+  source_offsets_json = 来源定位，例如 parser、block_index、line_start、line_end、char_start、char_end
+  entity_refs_json = 实体引用，例如 command、parameter、term、feature
+  processing_profile_json = 文件级处理状态，例如 parse_status、parser、skip_reason、errors
+  scope_json = 业务上下文，例如产品、版本、网元、项目、领域、作者、场景
+  metadata_json = 兜底扩展，禁止重复上述字段职责
+  ```
+
+  关键问题和建议如下。
+
+  1. **Markdown section tree 会重复切片，需要优先修。**
+
+     当前 H1/H2 可能同时挂在 root 和父 section 下，同一个表格或备注会被遍历多次，导致 `raw_segments` 重复。请把 Markdown section tree 修成单一父子树：H1 作为根或第一级 section 二选一，H2/H3 只挂在最近上级 heading 下。增加测试断言同一个 table / paragraph 在 `raw_segments.raw_text` 中只出现一次，`section_path` 精确为 `H1 -> H2`。
+
+  2. **Markdown table 不能压成纯文本，必须结构保真。**
+
+     Markdown 解析的意义不是只把 Markdown 切成文本，而是保留结构并让结构驱动切片。表格信息统一写入 `raw_segments.structure_json`，不要放入 `metadata_json`，也不要新增字段。最低结构：
+
+     ```json
+     {
+       "kind": "markdown_table",
+       "columns": ["参数标识", "参数名称", "参数说明"],
+       "rows": [
+         {
+           "参数标识": "APNNAME",
+           "参数名称": "APN 名称",
+           "参数说明": "必选参数。指定 APN 标识。"
+         }
+       ],
+       "row_count": 1,
+       "col_count": 3
+     }
+     ```
+
+     `entity_refs_json` 可以额外抽出 `{"type": "parameter", "name": "POOLNAME"}`，但实体引用不能代替表格 rows。
+
+  3. **canonicalization 三层归并实际失效，需要重写分层流程。**
+
+     当前 exact layer 把所有 content_hash group 都生成 canonical，包括单元素 group，并全部 assigned，导致 normalized / near layer 基本没有机会执行。请改为：exact 只处理 `len(group) > 1`；单元素继续进入 normalized / near 候选池；normalized 处理 normalized_hash 相同但 content_hash 不同的 group；near 再处理剩余；最后才生成 singleton。测试必须覆盖 content hash 不同但 normalized hash 相同、near duplicate 生效、无重复时 singleton。
+
+  4. **publish version 唯一性和事务边界需要修。**
+
+     `version_code/batch_code` 不能只用秒级时间戳，测试也不能靠 `sleep(1.1)` 避免冲突。请改成微秒时间戳 + 短 UUID，或直接使用 UUID 派生，并增加同一秒连续发布测试。激活流程也要收紧：旧 active -> archived 和新 staging -> active 必须在最后一个可 rollback 的原子事务里完成，失败时旧 active 不应变化。
+
+  5. **validation 需要覆盖 zero-primary canonical。**
+
+     当前只统计已有 primary 的 mapping，可能漏掉“某 canonical 没有 primary mapping”的情况。请从 canonical_segments left join source mappings 校验每个 canonical 恰好一个 primary，且至少一个 source mapping。
+
+  6. **TXT parser 不应丢标点或用 token 重组替代原文。**
+
+     token counting 可以单独做，但 `raw_text` 应尽量保持原文片段。TXT 可以先按空行/段落切片，超长段再按原文 offset 窗口切。
+
+  7. **`source_offsets_json` 和 `processing_profile_json` 需要最低契约。**
+
+     `source_offsets_json` 至少包括 parser、block_index、line_start、line_end；能拿到 char offset 时再加 char_start/char_end。`processing_profile_json` 对 MD/TXT 成功解析、HTML/PDF/DOCX 跳过、解析失败都要有明确 parse_status。
+
+  8. **`conflict_candidate` 当前没有实际生成路径。**
+
+     如果 M1 暂不做复杂冲突检测，请明确不宣称已完成。若要做，建议先用保守规则：同一 entity/scope/semantic_role 下文本差异显著但指向同一对象的来源，标为 `conflict_candidate`，且不能作为普通答案材料。
+
+  9. **v0.5 handoff 文件缺失。**
+
+     `COLLAB_TASKS.md` 引用了 `docs/handoffs/2026-04-17-m1-knowledge-mining-claude-v05-revision.md`，但当前文件不存在。请补齐正式 handoff，说明本轮改动、已知未完成项、测试命令与结果、正式混合测试文件夹和 Mining->Serving 契约测试状态。
+
+- 预期动作：
+  请先修 P1：Markdown section tree、table/list/code 结构保真、canonicalization 分层归并、publish version 唯一性与事务边界、primary validation。修复后补充针对性测试，并在消息中说明 JSON 字段职责边界已按本消息落实。全局 schema 暂不修改。
