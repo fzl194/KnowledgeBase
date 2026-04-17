@@ -1,9 +1,23 @@
-"""Query Normalizer — extract constraints from natural language queries."""
+"""Query Normalizer — extract entities, scope, and intent from queries.
+
+Outputs a generic NormalizedQuery with entities[] + scope{} + intent.
+Commands are just one entity type among many (command, feature, term, alarm).
+build_plan() converts normalized query to a QueryPlan for repository use.
+"""
 from __future__ import annotations
 
 import re
 
-from agent_serving.serving.schemas.models import NormalizedQuery
+from agent_serving.serving.schemas.models import (
+    EntityRef,
+    EvidenceBudget,
+    ExpansionConfig,
+    NormalizedQuery,
+    QueryPlan,
+    QueryScope,
+)
+
+# --- Rule-based extraction patterns ---
 
 OP_MAP = {
     "新增": "ADD", "添加": "ADD", "创建": "ADD",
@@ -27,26 +41,43 @@ NE_RE = re.compile(
     r"\b(AMF|SMF|UPF|UDM|PCF|NRF|AUSF|BSF|NSSF|SCP|UDSF|UDR)\b", re.IGNORECASE
 )
 
-PRODUCT_NAMES = {"UDG", "UNC", "UPF", "AMF", "SMF", "PCF", "UDM"}
+INTENT_COMMAND_KEYWORDS = {"命令", "用法", "参数", "格式", "语法", "怎么写", "如何配置"}
+INTENT_TROUBLESHOOT_KEYWORDS = {"故障", "排查", "告警", "错误", "异常", "处理"}
+INTENT_CONCEPT_KEYWORDS = {"是什么", "什么是", "概念", "介绍", "概述", "原理"}
+INTENT_PROCEDURE_KEYWORDS = {"步骤", "流程", "操作", "怎么做", "如何操作"}
 
 
 class QueryNormalizer:
     def normalize(self, query: str) -> NormalizedQuery:
-        command = self._extract_command(query)
-        product = self._extract_product(query)
-        product_version = self._extract_version(query)
-        network_element = self._extract_ne(query, product)
+        entities = self._extract_entities(query)
+        scope = self._extract_scope(query)
+        intent = self._detect_intent(query, entities)
         keywords = self._extract_keywords(query)
-        missing = self._find_missing(command, product, product_version, network_element)
+        missing = self._find_missing(entities, scope, intent)
+        desired_roles = self._desired_roles_for_intent(intent)
 
         return NormalizedQuery(
-            command=command,
-            product=product,
-            product_version=product_version,
-            network_element=network_element,
+            intent=intent,
+            entities=entities,
+            scope=scope,
             keywords=keywords,
+            desired_semantic_roles=desired_roles,
             missing_constraints=missing,
         )
+
+    def _extract_entities(self, query: str) -> list[EntityRef]:
+        entities: list[EntityRef] = []
+        seen: set[str] = set()
+
+        # Extract command entities
+        cmd = self._extract_command(query)
+        if cmd:
+            key = f"command:{cmd}"
+            if key not in seen:
+                entities.append(EntityRef(type="command", name=cmd, normalized_name=cmd))
+                seen.add(key)
+
+        return entities
 
     def _extract_command(self, query: str) -> str | None:
         match = COMMAND_RE.search(query)
@@ -61,23 +92,52 @@ class QueryNormalizer:
                     target = target_match.group(1).upper()
                     return f"{cmd_prefix} {target}"
                 return cmd_prefix
-
         return None
 
-    def _extract_product(self, query: str) -> str | None:
-        match = PRODUCT_RE.search(query)
-        return match.group(1).upper() if match else None
+    def _extract_scope(self, query: str) -> QueryScope:
+        products: list[str] = []
+        product_versions: list[str] = []
+        network_elements: list[str] = []
 
-    def _extract_version(self, query: str) -> str | None:
-        match = VERSION_RE.search(query)
-        return match.group(1) if match else None
+        for m in PRODUCT_RE.finditer(query):
+            p = m.group(1).upper()
+            if p not in products:
+                products.append(p)
 
-    def _extract_ne(self, query: str, product: str | None) -> str | None:
-        for match in NE_RE.finditer(query):
-            ne = match.group(1).upper()
-            if ne != product:
-                return ne
-        return None
+        v = VERSION_RE.search(query)
+        if v:
+            product_versions.append(v.group(1))
+
+        for m in NE_RE.finditer(query):
+            ne = m.group(1).upper()
+            if ne not in products and ne not in network_elements:
+                network_elements.append(ne)
+
+        return QueryScope(
+            products=products,
+            product_versions=product_versions,
+            network_elements=network_elements,
+        )
+
+    def _detect_intent(self, query: str, entities: list[EntityRef]) -> str:
+        has_command = any(e.type == "command" for e in entities)
+
+        if has_command:
+            return "command_usage"
+
+        for kw in INTENT_TROUBLESHOOT_KEYWORDS:
+            if kw in query:
+                return "troubleshooting"
+
+        for kw in INTENT_PROCEDURE_KEYWORDS:
+            if kw in query:
+                return "procedure"
+
+        for kw in INTENT_CONCEPT_KEYWORDS:
+            if kw in query:
+                return "concept_lookup"
+
+        return "general"
 
     def _extract_keywords(self, query: str) -> list[str]:
         cleaned = query
@@ -87,15 +147,57 @@ class QueryNormalizer:
         return tokens
 
     def _find_missing(
-        self,
-        command: str | None,
-        product: str | None,
-        product_version: str | None,
-        network_element: str | None,
+        self, entities: list[EntityRef], scope: QueryScope, intent: str
     ) -> list[str]:
         missing: list[str] = []
-        if command and not product:
-            missing.append("product")
-        if product and not product_version:
-            missing.append("product_version")
+        if intent == "command_usage":
+            if not scope.products:
+                missing.append("product")
+            if scope.products and not scope.product_versions:
+                missing.append("product_version")
         return missing
+
+    def _desired_roles_for_intent(self, intent: str) -> list[str]:
+        role_map: dict[str, list[str]] = {
+            "command_usage": ["parameter", "example", "procedure_step"],
+            "troubleshooting": ["troubleshooting_step", "alarm", "constraint"],
+            "concept_lookup": ["concept", "note"],
+            "procedure": ["procedure_step", "parameter", "example"],
+            "comparison": ["concept", "parameter", "constraint"],
+            "general": [],
+        }
+        return role_map.get(intent, [])
+
+
+def build_plan(normalized: NormalizedQuery) -> QueryPlan:
+    """Convert a normalized query into a QueryPlan.
+
+    M1 uses simple rule-based planning. Future M2+ can replace this
+    with LLM planner, ontology expansion, or multi-agent orchestration.
+    """
+    variant_policy = "flag"
+    if normalized.missing_constraints and normalized.intent == "command_usage":
+        variant_policy = "require_disambiguation"
+
+    return QueryPlan(
+        intent=normalized.intent,
+        retrieval_targets=["canonical_segments"],
+        entity_constraints=[
+            EntityRef(type=e.type, name=e.name, normalized_name=e.normalized_name)
+            for e in normalized.entities
+        ],
+        scope_constraints=QueryScope(
+            products=list(normalized.scope.products),
+            product_versions=list(normalized.scope.product_versions),
+            network_elements=list(normalized.scope.network_elements),
+            projects=list(normalized.scope.projects),
+            domains=list(normalized.scope.domains),
+        ),
+        semantic_role_preferences=list(normalized.desired_semantic_roles),
+        block_type_preferences=list(normalized.desired_block_types),
+        variant_policy=variant_policy,
+        conflict_policy="flag_not_answer",
+        evidence_budget=EvidenceBudget(canonical_limit=10, raw_per_canonical=3),
+        expansion=ExpansionConfig(use_ontology=False, max_hops=0),
+        keywords=list(normalized.keywords),
+    )

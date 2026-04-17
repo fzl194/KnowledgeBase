@@ -1,16 +1,24 @@
-"""Search API — query L1 canonical_segments, drill down to L0 via L2."""
+"""Search API — unified QueryPlan pipeline for generic evidence retrieval.
+
+/search is the main entry. /command-usage is a compatible shortcut that
+forces intent=command_usage and uses entity.type=command, but otherwise
+walks the same pipeline as /search.
+"""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from agent_serving.serving.schemas.models import (
     CommandUsageRequest,
-    ContextPack,
+    EntityRef,
+    EvidencePack,
+    NormalizedQuery,
+    QueryPlan,
     SearchRequest,
 )
 from agent_serving.serving.repositories.asset_repo import AssetRepository
-from agent_serving.serving.application.normalizer import QueryNormalizer
-from agent_serving.serving.application.assembler import ContextAssembler
+from agent_serving.serving.application.normalizer import QueryNormalizer, build_plan
+from agent_serving.serving.application.assembler import EvidenceAssembler
 
 router = APIRouter(prefix="/api/v1", tags=["search"])
 
@@ -19,117 +27,90 @@ def get_repo(request: Request) -> AssetRepository:
     return AssetRepository(request.app.state.db)
 
 
-def _intent_from_query(normalized) -> str:
-    if normalized.command:
-        return "command_usage"
-    return "general_query"
+async def _execute_plan(
+    query: str, normalized: NormalizedQuery, plan: QueryPlan, repo: AssetRepository,
+) -> EvidencePack:
+    """Core pipeline: search canonical → drill down → assemble evidence pack."""
+    assembler = EvidenceAssembler()
 
+    # 1. Search L1 canonical segments
+    canonical_hits = await repo.search_canonical(plan)
 
-@router.post("/search", response_model=ContextPack)
-async def search(
-    request: SearchRequest,
-    repo: AssetRepository = Depends(get_repo),
-) -> ContextPack:
-    normalizer = QueryNormalizer()
-    assembler = ContextAssembler()
-
-    normalized = normalizer.normalize(request.query)
-
-    # Search L1 canonical segments
-    canonical_hits = await repo.search_canonical(
-        command_name=normalized.command,
-        keyword=normalized.keywords[0] if normalized.keywords and not normalized.command else None,
-    )
-
-    # If keyword search found nothing and keywords exist, try each keyword
-    if not canonical_hits and normalized.keywords and not normalized.command:
-        for kw in normalized.keywords:
-            canonical_hits = await repo.search_canonical(keyword=kw)
-            if canonical_hits:
-                break
-
-    # If command search found nothing, try keyword with command name
-    if not canonical_hits and normalized.command:
-        canonical_hits = await repo.search_canonical(
-            keyword=normalized.command.split()[-1] if normalized.command else None,
+    # 2. Fallback: if entity search found nothing, try keywords
+    if not canonical_hits and plan.keywords:
+        from agent_serving.serving.schemas.models import QueryPlan as QP
+        keyword_plan = QP(
+            intent=plan.intent,
+            retrieval_targets=plan.retrieval_targets,
+            entity_constraints=[],
+            scope_constraints=plan.scope_constraints,
+            semantic_role_preferences=plan.semantic_role_preferences,
+            block_type_preferences=plan.block_type_preferences,
+            variant_policy=plan.variant_policy,
+            conflict_policy=plan.conflict_policy,
+            evidence_budget=plan.evidence_budget,
+            expansion=plan.expansion,
+            keywords=plan.keywords,
         )
+        canonical_hits = await repo.search_canonical(keyword_plan)
 
-    intent = _intent_from_query(normalized)
-
-    # Fetch drill-down and conflict data for each canonical hit
-    all_drill: list[dict] = []
-    all_conflicts: list[dict] = []
+    # 3. Drill down for each canonical hit
+    drill_results: list[tuple[list[dict], list[dict], list[dict]]] = []
     for canon in canonical_hits:
-        drill = await repo.drill_down(
+        evidence, variants, conflicts = await repo.drill_down(
             canonical_segment_id=canon["id"],
-            product=normalized.product,
-            product_version=normalized.product_version,
-            network_element=normalized.network_element,
-            exclude_conflict=True,
+            plan=plan,
         )
-        all_drill.extend(drill)
-        conflicts = await repo.get_conflict_sources(
-            canonical_segment_id=canon["id"],
-        )
-        all_conflicts.extend(conflicts)
+        drill_results.append((evidence, variants, conflicts))
 
+    # 4. Assemble evidence pack
     pack = assembler.assemble(
-        query=request.query,
-        intent=intent,
+        query=query,
+        intent=plan.intent,
         normalized=normalized,
+        plan=plan,
         canonical_hits=canonical_hits,
-        drill_results=all_drill,
-        conflict_sources=all_conflicts,
+        drill_results=drill_results,
     )
 
     return pack
 
 
-@router.post("/command-usage", response_model=ContextPack)
+@router.post("/search", response_model=EvidencePack)
+async def search(
+    request: SearchRequest,
+    repo: AssetRepository = Depends(get_repo),
+) -> EvidencePack:
+    normalizer = QueryNormalizer()
+    normalized = normalizer.normalize(request.query)
+    plan = build_plan(normalized)
+
+    return await _execute_plan(request.query, normalized, plan, repo)
+
+
+@router.post("/command-usage", response_model=EvidencePack)
 async def command_usage(
     request: CommandUsageRequest,
     repo: AssetRepository = Depends(get_repo),
-) -> ContextPack:
-    """Dedicated command usage endpoint — requires command context."""
-    normalizer = QueryNormalizer()
-    assembler = ContextAssembler()
+) -> EvidencePack:
+    """Compatible shortcut: forces intent=command_usage.
 
+    Internally walks the same QueryPlan pipeline as /search.
+    """
+    normalizer = QueryNormalizer()
     normalized = normalizer.normalize(request.query)
-    if not normalized.command:
+
+    # Force intent to command_usage
+    has_command = any(e.type == "command" for e in normalized.entities)
+    if not has_command:
         raise HTTPException(
             status_code=400,
             detail="Could not identify a command in the query",
         )
 
-    canonical_hits = await repo.search_canonical(command_name=normalized.command)
-    if not canonical_hits:
-        canonical_hits = await repo.search_canonical(
-            keyword=normalized.command.split()[-1],
-        )
+    # Override intent for command-usage shortcut
+    normalized.intent = "command_usage"
+    normalized.desired_semantic_roles = ["parameter", "example", "procedure_step"]
 
-    all_drill: list[dict] = []
-    all_conflicts: list[dict] = []
-    for canon in canonical_hits:
-        drill = await repo.drill_down(
-            canonical_segment_id=canon["id"],
-            product=normalized.product,
-            product_version=normalized.product_version,
-            network_element=normalized.network_element,
-            exclude_conflict=True,
-        )
-        all_drill.extend(drill)
-        conflicts = await repo.get_conflict_sources(
-            canonical_segment_id=canon["id"],
-        )
-        all_conflicts.extend(conflicts)
-
-    pack = assembler.assemble(
-        query=request.query,
-        intent="command_usage",
-        normalized=normalized,
-        canonical_hits=canonical_hits,
-        drill_results=all_drill,
-        conflict_sources=all_conflicts,
-    )
-
-    return pack
+    plan = build_plan(normalized)
+    return await _execute_plan(request.query, normalized, plan, repo)

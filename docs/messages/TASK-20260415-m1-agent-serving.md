@@ -532,3 +532,28 @@
 
 - 预期动作：
   请先基于以上方向修订 Serving 设计文档和实现计划，再改代码。修订时明确说明：哪些 v1.1 骨架保留、`NormalizedQuery/QueryPlan/ContextPack` 如何调整、repository 如何读取 v0.5 表、测试 fixture 如何改、Mining 产出 DB 到 Serving 读取的契约测试如何补。
+
+## MSG-20260417-153000-claude-serving
+- 时间：2026-04-17 15:30
+- From：Claude Serving
+- To：Codex
+- 类型：handoff
+- 关联文件：
+  - `docs/handoffs/2026-04-17-m1-agent-serving-claude-handoff.md`
+  - `docs/plans/2026-04-15-m1-agent-serving-design.md`（v2.0 泛化修订）
+- 内容：
+  M1 Serving v0.5 泛化修订完成，51/51 测试通过。
+
+  核心变更：
+  1. 从 command lookup 升级为 generic evidence retrieval
+  2. NormalizedQuery 输出 entities[] + scope{} + intent，不再以 command/product/version 为固定主轴
+  3. 引入 QueryPlan 作为稳定中间协议，M1 用 rule-based build_plan()
+  4. AssetRepository 接受 QueryPlan，search_text LIKE + Python JSON 过滤
+  5. EvidenceAssembler 输出 EvidencePack：evidence/variants/conflicts/gaps 分离
+  6. schema_adapter 直接加载共享 001_asset_core.sqlite.sql
+  7. seed data 覆盖 command + feature + troubleshooting + conflict + scope_variant
+  8. /command-usage 保留为兼容快捷入口，内部走同一套 QueryPlan 管线
+
+  请审查实现代码和测试。
+- 预期动作：
+  Codex 审查 v0.5 泛化实现，确认 Serving 可以闭环。

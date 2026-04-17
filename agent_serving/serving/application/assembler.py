@@ -1,169 +1,306 @@
-"""ContextAssembler — build context pack with conflict handling."""
+"""EvidenceAssembler — build EvidencePack from query results.
+
+Separates evidence, variants, conflicts, and gaps.
+Uses v0.5 field names (block_type, semantic_role, entity_refs_json, scope_json).
+"""
 from __future__ import annotations
 
 import json
 
 from agent_serving.serving.schemas.models import (
-    AnswerMaterials,
-    CanonicalSegmentRef,
-    ContextPack,
-    KeyObjects,
+    CanonicalItem,
+    ConflictInfo,
+    EntityRef,
+    EvidenceItem,
+    EvidencePack,
+    Gap,
     NormalizedQuery,
-    RawSegmentRef,
+    QueryPlan,
+    QueryScope,
     SourceRef,
-    Uncertainty,
+    VariantInfo,
 )
 
 
-class ContextAssembler:
+class EvidenceAssembler:
     def assemble(
         self,
         *,
         query: str,
         intent: str,
         normalized: NormalizedQuery,
+        plan: QueryPlan,
         canonical_hits: list[dict],
-        drill_results: list[dict],
-        conflict_sources: list[dict],
-    ) -> ContextPack:
-        key_objects = KeyObjects(
-            command=normalized.command,
-            product=normalized.product,
-            product_version=normalized.product_version,
-            network_element=normalized.network_element,
-        )
+        drill_results: list[tuple[list[dict], list[dict], list[dict]]],
+    ) -> EvidencePack:
+        """Assemble EvidencePack from drill-down results.
 
-        canon_refs = [
-            CanonicalSegmentRef(
-                id=str(h["id"]),
-                segment_type=h["segment_type"],
-                title=h.get("title"),
-                canonical_text=h["canonical_text"],
-                command_name=h.get("command_name"),
-                has_variants=bool(h.get("has_variants")),
-                variant_policy=h.get("variant_policy", "none"),
-            )
-            for h in canonical_hits
+        drill_results is a list of (evidence, variants, conflicts) tuples,
+        one per canonical hit.
+        """
+        # Build canonical items
+        canonical_items = [
+            self._build_canonical_item(h) for h in canonical_hits
         ]
 
-        raw_refs = [
-            RawSegmentRef(
-                id=str(r["id"]),
-                segment_type=r["segment_type"],
-                raw_text=r["raw_text"],
-                command_name=r.get("command_name"),
-                section_path=_parse_section_path(r.get("section_path", "[]")),
-                section_title=r.get("section_title"),
-            )
-            for r in drill_results
-        ]
+        # Build evidence, variants, conflicts, sources from drill results
+        all_evidence: list[dict] = []
+        all_variants: list[dict] = []
+        all_conflicts: list[dict] = []
 
-        sources = self._build_sources(drill_results)
-        uncertainties = self._build_uncertainties(normalized, canonical_hits)
-        conflict_uncertainties = self._build_conflict_uncertainties(conflict_sources)
-        uncertainties.extend(conflict_uncertainties)
+        for evidence_rows, variant_rows, conflict_rows in drill_results:
+            all_evidence.extend(evidence_rows)
+            all_variants.extend(variant_rows)
+            all_conflicts.extend(conflict_rows)
 
-        followups = self._build_followups(uncertainties)
+        evidence_items = [self._build_evidence_item(r) for r in all_evidence]
+        sources = [self._build_source(r) for r in all_evidence]
+        variants = [self._build_variant(r) for r in all_variants]
+        conflicts = [self._build_conflict(r) for r in all_conflicts]
 
-        return ContextPack(
+        # Build gaps
+        gaps = self._build_gaps(normalized, canonical_hits, all_variants)
+
+        # Matched entities and scope from canonical hits
+        matched_entities = self._collect_entities(canonical_hits)
+        matched_scope = self._collect_scope(canonical_hits)
+
+        # Build followups
+        followups = self._build_followups(gaps, conflicts)
+
+        return EvidencePack(
             query=query,
             intent=intent,
             normalized_query=self._build_normalized_str(normalized),
-            key_objects=key_objects,
-            answer_materials=AnswerMaterials(
-                canonical_segments=canon_refs,
-                raw_segments=raw_refs,
-            ),
+            query_plan=plan,
+            canonical_items=canonical_items,
+            evidence_items=evidence_items,
             sources=sources,
-            uncertainties=uncertainties,
+            matched_entities=matched_entities,
+            matched_scope=matched_scope,
+            variants=variants,
+            conflicts=conflicts,
+            gaps=gaps,
             suggested_followups=followups,
         )
 
-    def _build_sources(self, drill_results: list[dict]) -> list[SourceRef]:
-        return [
-            SourceRef(
-                document_key=r.get("document_key", ""),
-                section_path=_parse_section_path(r.get("section_path", "[]")),
-                segment_type=r["segment_type"],
-                product=r.get("product"),
-                product_version=r.get("product_version"),
-                network_element=r.get("network_element"),
-            )
-            for r in drill_results
-        ]
+    def _build_canonical_item(self, h: dict) -> CanonicalItem:
+        entity_refs = _parse_entity_refs(h.get("entity_refs_json", "[]"))
+        scope = _parse_scope(h.get("scope_json", "{}"))
 
-    def _build_uncertainties(
-        self, normalized: NormalizedQuery, hits: list[dict]
-    ) -> list[Uncertainty]:
-        uncertainties: list[Uncertainty] = []
+        return CanonicalItem(
+            id=str(h["id"]),
+            canonical_key=h.get("canonical_key", ""),
+            block_type=h.get("block_type", "unknown"),
+            semantic_role=h.get("semantic_role", "unknown"),
+            title=h.get("title"),
+            canonical_text=h["canonical_text"],
+            summary=h.get("summary"),
+            entity_refs=entity_refs,
+            scope=scope,
+            has_variants=bool(h.get("has_variants")),
+            variant_policy=h.get("variant_policy", "none"),
+            quality_score=h.get("quality_score"),
+        )
+
+    def _build_evidence_item(self, r: dict) -> EvidenceItem:
+        entity_refs = _parse_entity_refs(r.get("entity_refs_json", "[]"))
+
+        return EvidenceItem(
+            id=str(r["id"]),
+            block_type=r.get("block_type", "unknown"),
+            semantic_role=r.get("semantic_role", "unknown"),
+            raw_text=r["raw_text"],
+            section_path=_parse_section_path(r.get("section_path", "[]")),
+            section_title=r.get("section_title"),
+            entity_refs=entity_refs,
+        )
+
+    def _build_source(self, r: dict) -> SourceRef:
+        scope = _parse_scope(r.get("doc_scope_json", "{}"))
+
+        return SourceRef(
+            document_key=r.get("document_key", ""),
+            relative_path=r.get("relative_path"),
+            section_path=_parse_section_path(r.get("section_path", "[]")),
+            block_type=r.get("block_type"),
+            scope=scope,
+        )
+
+    def _build_variant(self, r: dict) -> VariantInfo:
+        scope = _parse_scope(r.get("doc_scope_json", "{}"))
+
+        return VariantInfo(
+            raw_segment_id=str(r["id"]),
+            relation_type=r.get("relation_type", "scope_variant"),
+            diff_summary=r.get("diff_summary"),
+            scope=scope,
+        )
+
+    def _build_conflict(self, r: dict) -> ConflictInfo:
+        scope = _parse_scope(r.get("doc_scope_json", "{}"))
+
+        return ConflictInfo(
+            raw_text=r.get("raw_text", ""),
+            diff_summary=r.get("diff_summary"),
+            scope=scope,
+        )
+
+    def _build_gaps(
+        self, normalized: NormalizedQuery, hits: list[dict], variants: list[dict],
+    ) -> list[Gap]:
+        gaps: list[Gap] = []
         has_variants_hit = any(h.get("has_variants") for h in hits)
 
         if has_variants_hit and normalized.missing_constraints:
             if "product" in normalized.missing_constraints:
-                uncertainties.append(
-                    Uncertainty(
-                        field="product",
-                        reason="该命令在不同产品上有差异，需要指定产品",
-                        suggested_options=["UDG", "UNC", "UPF"],
-                    )
-                )
+                gaps.append(Gap(
+                    field="product",
+                    reason="该知识在不同产品上有差异，需要指定产品",
+                    suggested_options=["UDG", "UNC", "UPF"],
+                ))
             if "product_version" in normalized.missing_constraints:
-                uncertainties.append(
-                    Uncertainty(
-                        field="product_version",
-                        reason="该命令参数在不同版本间可能有差异",
-                        suggested_options=[],
-                    )
-                )
-        return uncertainties
+                gaps.append(Gap(
+                    field="product_version",
+                    reason="该知识在不同版本间可能有差异",
+                    suggested_options=[],
+                ))
 
-    def _build_conflict_uncertainties(
-        self, conflict_sources: list[dict]
-    ) -> list[Uncertainty]:
-        uncertainties: list[Uncertainty] = []
-        for cs in conflict_sources:
-            product = cs.get("product", "未知产品")
-            diff = cs.get("diff_summary", "存在内容矛盾")
-            uncertainties.append(
-                Uncertainty(
-                    field="conflict",
-                    reason=f"知识库中存在冲突来源（{product}）：{diff}",
-                    suggested_options=[product],
-                )
-            )
-        return uncertainties
+        if variants:
+            scope_descs = []
+            for v in variants[-3:]:
+                scope = v.get("doc_scope_json", "{}")
+                scope_descs.append(str(scope))
+            gaps.append(Gap(
+                field="scope_variant",
+                reason=f"存在 {len(variants)} 个 scope 变体未纳入主 evidence",
+                suggested_options=[],
+            ))
 
-    def _build_followups(self, uncertainties: list[Uncertainty]) -> list[str]:
-        if not uncertainties:
-            return []
-        conflict_fields = [u.field for u in uncertainties if u.field != "conflict"]
-        conflict_count = sum(1 for u in uncertainties if u.field == "conflict")
-        parts = []
-        if conflict_fields:
-            parts.append(f"请确认{'/'.join(conflict_fields)}以获取精确答案")
-        if conflict_count > 0:
-            parts.append(f"发现 {conflict_count} 处知识冲突，建议核实产品版本后重新查询")
+        return gaps
+
+    def _collect_entities(self, hits: list[dict]) -> list[EntityRef]:
+        seen: set[str] = set()
+        result: list[EntityRef] = []
+        for h in hits:
+            refs = _parse_entity_refs(h.get("entity_refs_json", "[]"))
+            for ref in refs:
+                key = f"{ref.type}:{ref.normalized_name}"
+                if key not in seen:
+                    result.append(ref)
+                    seen.add(key)
+        return result
+
+    def _collect_scope(self, hits: list[dict]) -> QueryScope:
+        all_products: list[str] = []
+        all_versions: list[str] = []
+        all_nes: list[str] = []
+        all_projects: list[str] = []
+        all_domains: list[str] = []
+
+        for h in hits:
+            scope = _parse_scope(h.get("scope_json", "{}"))
+            for p in scope.products:
+                if p not in all_products:
+                    all_products.append(p)
+            for v in scope.product_versions:
+                if v not in all_versions:
+                    all_versions.append(v)
+            for ne in scope.network_elements:
+                if ne not in all_nes:
+                    all_nes.append(ne)
+            for pr in scope.projects:
+                if pr not in all_projects:
+                    all_projects.append(pr)
+            for d in scope.domains:
+                if d not in all_domains:
+                    all_domains.append(d)
+
+        return QueryScope(
+            products=all_products,
+            product_versions=all_versions,
+            network_elements=all_nes,
+            projects=all_projects,
+            domains=all_domains,
+        )
+
+    def _build_followups(self, gaps: list[Gap], conflicts: list[ConflictInfo]) -> list[str]:
+        parts: list[str] = []
+        gap_fields = [g.field for g in gaps if g.field != "scope_variant"]
+        if gap_fields:
+            parts.append(f"请确认{'/'.join(gap_fields)}以获取精确答案")
+        if conflicts:
+            parts.append(f"发现 {len(conflicts)} 处知识冲突，建议核实产品版本后重新查询")
+        if any(g.field == "scope_variant" for g in gaps):
+            parts.append("部分 scope 变体未展示，可指定更精确的产品/版本/网元缩小范围")
         return parts
 
     def _build_normalized_str(self, normalized: NormalizedQuery) -> str:
         parts: list[str] = []
-        if normalized.command:
-            parts.append(normalized.command)
-        if normalized.product:
-            parts.append(normalized.product)
-        if normalized.product_version:
-            parts.append(normalized.product_version)
-        if normalized.network_element:
-            parts.append(normalized.network_element)
+        parts.append(f"intent={normalized.intent}")
+        for e in normalized.entities:
+            parts.append(f"{e.type}={e.name}")
+        if normalized.scope.products:
+            parts.append(f"products={','.join(normalized.scope.products)}")
+        if normalized.scope.product_versions:
+            parts.append(f"versions={','.join(normalized.scope.product_versions)}")
+        if normalized.scope.network_elements:
+            parts.append(f"nes={','.join(normalized.scope.network_elements)}")
         parts.extend(normalized.keywords)
         return " ".join(parts)
 
 
+# --- JSON helpers ---
+
 def _parse_section_path(raw: str | list) -> list[str]:
     if isinstance(raw, list):
+        if raw and isinstance(raw[0], dict):
+            return [item.get("title", "") for item in raw if item.get("title")]
         return raw
     try:
         parsed = json.loads(raw)
-        return parsed if isinstance(parsed, list) else []
+        if isinstance(parsed, list):
+            if parsed and isinstance(parsed[0], dict):
+                return [item.get("title", "") for item in parsed if item.get("title")]
+            return parsed
+        return []
     except (json.JSONDecodeError, TypeError):
         return []
+
+
+def _parse_entity_refs(raw: str | list) -> list[EntityRef]:
+    if isinstance(raw, list):
+        items = raw
+    else:
+        try:
+            items = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return []
+    return [
+        EntityRef(
+            type=item.get("type", "unknown"),
+            name=item.get("name", ""),
+            normalized_name=item.get("normalized_name", item.get("name", "")),
+        )
+        for item in items
+        if isinstance(item, dict)
+    ]
+
+
+def _parse_scope(raw: str | dict) -> QueryScope:
+    if isinstance(raw, dict):
+        d = raw
+    else:
+        try:
+            d = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return QueryScope()
+    if not isinstance(d, dict):
+        return QueryScope()
+    return QueryScope(
+        products=d.get("products", []),
+        product_versions=d.get("product_versions", []),
+        network_elements=d.get("network_elements", []),
+        projects=d.get("projects", []),
+        domains=d.get("domains", []),
+    )

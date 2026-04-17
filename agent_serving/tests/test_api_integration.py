@@ -11,21 +11,16 @@ from agent_serving.tests.conftest import _seed_data
 @pytest_asyncio.fixture
 async def client():
     """Test client with in-memory DB seeded from shared schema."""
-    db = await _create_seeded_db()
-    app.state.db = db
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        yield ac
-    await db.close()
-
-
-async def _create_seeded_db():
     import aiosqlite
     db = await aiosqlite.connect(":memory:")
     db.row_factory = aiosqlite.Row
     await create_asset_tables_sqlite(db)
     await _seed_data(db)
-    return db
+    app.state.db = db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+    await db.close()
 
 
 @pytest.mark.asyncio
@@ -42,8 +37,8 @@ async def test_search_command_query(client):
     assert resp.status_code == 200
     pack = resp.json()
     assert pack["intent"] == "command_usage"
-    assert len(pack["answer_materials"]["canonical_segments"]) >= 1
-    assert pack["answer_materials"]["canonical_segments"][0]["command_name"] == "ADD APN"
+    assert len(pack["canonical_items"]) >= 1
+    assert any(e["type"] == "command" for e in pack["matched_entities"])
 
 
 @pytest.mark.asyncio
@@ -51,21 +46,28 @@ async def test_search_keyword_query(client):
     resp = await client.post("/api/v1/search", json={"query": "5G 移动通信"})
     assert resp.status_code == 200
     pack = resp.json()
-    assert pack["intent"] == "general_query"
-    assert len(pack["answer_materials"]["canonical_segments"]) >= 1
-    assert "5G" in pack["answer_materials"]["canonical_segments"][0]["canonical_text"]
+    assert len(pack["canonical_items"]) >= 1
+    assert any("5G" in ci["canonical_text"] for ci in pack["canonical_items"])
 
 
 @pytest.mark.asyncio
-async def test_search_with_product_filter(client):
+async def test_search_troubleshooting(client):
+    resp = await client.post("/api/v1/search", json={"query": "CPU过载告警怎么排查"})
+    assert resp.status_code == 200
+    pack = resp.json()
+    assert pack["intent"] == "troubleshooting"
+
+
+@pytest.mark.asyncio
+async def test_search_with_scope_filter(client):
     resp = await client.post("/api/v1/search", json={"query": "UDG V100R023C10 ADD APN"})
     assert resp.status_code == 200
     pack = resp.json()
-    assert len(pack["answer_materials"]["raw_segments"]) >= 1
-    # All raw segments should be from UDG
+    assert len(pack["evidence_items"]) >= 1
+    # All evidence should come from UDG scope
     for src in pack["sources"]:
-        if src.get("product"):
-            assert src["product"] == "UDG"
+        if src["scope"]["products"]:
+            assert "UDG" in src["scope"]["products"]
 
 
 @pytest.mark.asyncio
@@ -83,15 +85,34 @@ async def test_command_usage_no_command(client):
 
 
 @pytest.mark.asyncio
-async def test_conflict_does_not_appear_in_raw_segments(client):
-    """Conflict candidates must become uncertainties, not raw_segments."""
+async def test_conflict_not_in_evidence(client):
+    """Conflict candidates must appear in conflicts, NOT in evidence_items."""
     resp = await client.post("/api/v1/search", json={"query": "ADD APN"})
     assert resp.status_code == 200
     pack = resp.json()
-    # Conflict text should NOT appear in raw_segments
-    raw_texts = [r["raw_text"] for r in pack["answer_materials"]["raw_segments"]]
-    for rt in raw_texts:
+    evidence_texts = [e["raw_text"] for e in pack["evidence_items"]]
+    for rt in evidence_texts:
         assert "参数冲突版本" not in rt
-    # But should appear in uncertainties
-    if pack["uncertainties"]:
-        assert any("冲突" in u["reason"] for u in pack["uncertainties"])
+    if pack["conflicts"]:
+        assert any("冲突" in c.get("raw_text", "") or "冲突" in c.get("diff_summary", "")
+                    for c in pack["conflicts"])
+
+
+@pytest.mark.asyncio
+async def test_evidence_pack_has_query_plan(client):
+    resp = await client.post("/api/v1/search", json={"query": "ADD APN"})
+    assert resp.status_code == 200
+    pack = resp.json()
+    assert pack["query_plan"] is not None
+    assert pack["query_plan"]["conflict_policy"] == "flag_not_answer"
+
+
+@pytest.mark.asyncio
+async def test_search_returns_block_type_and_semantic_role(client):
+    resp = await client.post("/api/v1/search", json={"query": "ADD APN"})
+    assert resp.status_code == 200
+    pack = resp.json()
+    assert len(pack["canonical_items"]) >= 1
+    ci = pack["canonical_items"][0]
+    assert ci["block_type"] in ("paragraph", "table", "list", "code", "unknown")
+    assert ci["semantic_role"] in ("parameter", "example", "concept", "unknown")

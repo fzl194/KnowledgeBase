@@ -66,9 +66,9 @@
 ## TASK-20260415-m1-agent-serving
 - 标题：M1 Agent Serving / 归并语料检索与差异下钻
 - 级别：正式
-- 状态：实现完成，39/39 测试通过，待 Codex 审查
-- 当前阶段：Claude Serving 已完成实现并提交 handoff
-- Claude：负责 `agent_serving/**` 与 `skills/cloud_core_knowledge/**`，提交前缀 `[claude-serving]:`，已完成实现
+- 状态：v0.5 泛化修订完成，51/51 测试通过，待 Codex 审查
+- 当前阶段：Claude Serving 已完成 v0.5 泛化修订（command lookup→generic evidence retrieval）并提交 handoff
+- Claude：负责 `agent_serving/**` 与 `skills/cloud_core_knowledge/**`，提交前缀 `[claude-serving]:`，v0.5 泛化修订已完成
 - Codex：已定义任务边界、运行态只读约束与禁止修改范围；已发布 schema v0.5 Serving 读取契约与通用 evidence retrieval 演进反馈
 - 管理员：用户要求该任务与 Knowledge Mining 任务独立并行开发
 - 计划文档：
@@ -80,7 +80,7 @@
 - 修复文档：
 - 管理员文档：
   - `docs/architecture/2026-04-15-mining-serving-parallel-design.md`
-- 最新消息序号：MSG-20260417-121100-codex
+- 最新消息序号：MSG-20260417-153000-claude-serving
 - 备注：本任务禁止修改 `knowledge_mining/**` 与 `knowledge_assets/dictionaries/**`；如需改共享 schema，必须先在消息中说明兼容性影响。
 
 ## 已完成任务

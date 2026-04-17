@@ -1,120 +1,97 @@
-# M1 Agent Serving — Claude Serving 交接文档
+# M1 Agent Serving — Claude Serving 交接文档 (v0.5 泛化修订)
 
 > 日期: 2026-04-17
 > 任务: TASK-20260415-m1-agent-serving
-> 状态: **M1 实现完成**，39/39 测试通过
+> 状态: **v0.5 泛化实现完成**，51/51 测试通过
 
 ## 任务目标
 
-实现 Agent 服务使用态在线查询最小闭环：
+从 command lookup 升级为面向 Agent 的通用知识检索与证据编排层：
 
 ```text
-Agent/Skill 请求 → 查询约束识别 → 检索 L1 canonical_segments → 通过 L2 下钻 L0 raw_segments → 返回 context pack
+Agent/Skill 请求
+  → Query Understanding (intent/entities/scope)
+  → QueryPlan (受控检索计划)
+  → search_text 召回 + Python JSON 过滤
+  → drill down via L2 分离 evidence/variant/conflict
+  → 返回 EvidencePack
 ```
 
-## 本次实现范围
+## 核心架构变更（相比 v1.1）
 
-| 组件 | 文件 | 状态 |
-|------|------|------|
-| Schema Adapter | `serving/repositories/schema_adapter.py` | ✅ |
-| Pydantic Models | `serving/schemas/models.py` | ✅ |
-| Asset Repository | `serving/repositories/asset_repo.py` | ✅ |
-| Query Normalizer | `serving/application/normalizer.py` | ✅ |
-| Context Assembler | `serving/application/assembler.py` | ✅ |
-| Search API | `serving/api/search.py` | ✅ |
-| Health API | `serving/api/health.py` | ✅ |
-| Main App | `serving/main.py` | ✅ |
-| Test Fixtures | `tests/conftest.py` | ✅ |
-| Unit Tests | `tests/test_*.py` (6 files) | ✅ |
-| Integration Tests | `tests/test_api_integration.py` (7 tests) | ✅ |
-
-## 明确不在本次范围内的内容
-
-- **SearchPlanner**（检索策略规划）→ M2
-- **context_assemble 独立端点** → M2
-- **LogRepository**（retrieval_logs 写入）→ M2
-- **init_serving.sql**（独立 serving schema）→ M2
-- Vector 检索 / embedding → M3
-- Markdown 解析 / 文档导入 / 去重归并 → Mining 任务
+| v1.1 (command lookup) | v2.0 (generic evidence retrieval) |
+|---|---|
+| `NormalizedQuery(command, product, version, NE)` | `NormalizedQuery(intent, entities[], scope{}, keywords)` |
+| `AssetRepo.search_canonical(command_name=)` | `AssetRepo.search_canonical(plan: QueryPlan)` |
+| `ContextAssembler` → `ContextPack` | `EvidenceAssembler` → `EvidencePack` |
+| `KeyObjects + AnswerMaterials` | `canonical_items + evidence_items + conflicts + gaps + variants` |
+| `schema_adapter` 动态 PG→SQLite | 直接加载共享 `001_asset_core.sqlite.sql` |
+| seed data 用 v0.4 字段 (command_name, product...) | seed data 用 v0.5 字段 (entity_refs_json, scope_json, block_type, semantic_role) |
+| 只测 command 场景 | 测 command + feature + troubleshooting + conflict + scope_variant |
 
 ## 改动文件清单
 
-### 新增
-- `agent_serving/serving/repositories/schema_adapter.py`
-- `agent_serving/serving/repositories/asset_repo.py`
-- `agent_serving/serving/application/normalizer.py`
-- `agent_serving/serving/application/assembler.py`
-- `agent_serving/serving/api/search.py`
-- `agent_serving/serving/schemas/models.py`
-- `agent_serving/tests/conftest.py`
+### 全部重写
+- `agent_serving/serving/repositories/schema_adapter.py` — 直接加载共享 SQLite DDL
+- `agent_serving/serving/repositories/asset_repo.py` — QueryPlan 驱动，scope_json 过滤
+- `agent_serving/serving/application/normalizer.py` — entities/scope/intent + build_plan()
+- `agent_serving/serving/application/assembler.py` — EvidenceAssembler + EvidencePack
+- `agent_serving/serving/schemas/models.py` — 新模型（EntityRef, QueryScope, QueryPlan, EvidencePack 等）
+- `agent_serving/serving/api/search.py` — 统一 QueryPlan 管线
+- `agent_serving/tests/conftest.py` — v0.5 seed data
+- `agent_serving/tests/test_normalizer.py` — 15 tests
+- `agent_serving/tests/test_asset_repo.py` — 9 tests
+- `agent_serving/tests/test_assembler.py` — 7 tests
+- `agent_serving/tests/test_api_integration.py` — 10 tests
+- `agent_serving/tests/test_models.py` — 6 tests
+
+### 未修改
+- `agent_serving/serving/main.py`
+- `agent_serving/serving/api/health.py`
+- `agent_serving/tests/test_health.py`
+- `agent_serving/tests/test_install_smoke.py`
 - `agent_serving/tests/test_schema_adapter.py`
-- `agent_serving/tests/test_models.py`
-- `agent_serving/tests/test_asset_repo.py`
-- `agent_serving/tests/test_normalizer.py`
-- `agent_serving/tests/test_assembler.py`
-- `agent_serving/tests/test_api_integration.py`
-
-### 修改
-- `agent_serving/serving/main.py`（lifespan + DB 注入）
-- `agent_serving/serving/api/health.py`（保持不变）
-- `pyproject.toml`（添加 aiosqlite 依赖）
-
-### 不修改
-- `knowledge_assets/schemas/001_asset_core.sql`（共享只读）
-- `knowledge_mining/**`（禁止修改）
 
 ## 关键设计决策
 
-1. **Schema Adapter**：从 `001_asset_core.sql` 自动生成 SQLite DDL，不维护私有 DDL
-2. **conflict_candidate 处理**：L2 中 `relation_type=conflict_candidate` 的记录转为 Uncertainty，不出现在 raw_segments 中
-3. **参数化 seed data**：conftest 使用 `executemany` + 参数化查询（`executescript` 无法正确处理 JSON 数组中的逗号）
-4. **DB 注入**：通过 `app.state.db` + FastAPI lifespan，API 层通过 `Request.app.state.db` 获取
-5. **纯 SQL 检索**：M1 使用 LIKE/command_name 精确匹配，不引入 vector 依赖
+1. **QueryPlan 是接口/扩展点**：M1 用 rule-based `build_plan()`，后续 M2+ 可替换为 LLM planner
+2. **command 只是 entity 的一种**：`entity_refs_json` 中 `type=command`，不再是专用 SQL 路径
+3. **`/command-usage` 是兼容快捷入口**：内部强制 intent=command_usage，走同一套 QueryPlan 管线
+4. **conflict 分离**：conflict_candidate 只进 `conflicts[]`，不进 `evidence_items[]`
+5. **直接用共享 SQLite DDL**：不再动态转换 PG DDL
+6. **scope 过滤在 Python 端做**：`search_text LIKE` 召回 + Python 解析 `scope_json` / `entity_refs_json` 过滤
 
 ## 已执行验证
 
 ```
-39/39 tests passed:
-- 3 schema adapter tests
-- 4 model tests
-- 10 asset repo tests
-- 9 normalizer tests
-- 4 assembler tests
-- 7 API integration tests (health, search, command-usage, conflict)
+51/51 tests passed:
+- 4 schema adapter tests (包含 v0.5 字段验证)
+- 6 model tests
+- 9 asset repo tests (QueryPlan 驱动)
+- 15 normalizer tests (entities/scope/intent/build_plan)
+- 7 assembler tests (conflict 分离/gaps/variants)
+- 10 API integration tests (全链路 + troubleshooting + scope filter)
 - 2 smoke tests (health, import)
 ```
 
 ## 未验证项
 
-- 生产 PostgreSQL 连接（当前仅 SQLite dev mode）
-- 高并发场景下的连接池
-- 实际 Mining 产出数据的端到端验证
+- 生产 PostgreSQL 连接
+- Mining 产出 DB 后的端到端契约测试（后续必须项）
+- 高并发连接池
+- LLM planner 接入（M2+）
 
 ## 已知风险
 
-1. **Normalizer 规则硬编码**：M1 使用固定映射表，无法覆盖所有中文操作词变体
-2. **LIKE 性能**：`search_text LIKE '%keyword%'` 无法利用索引，大数据量下可能慢
-3. **keyword 提取**：中文分词依赖空格/标点分割，对无空格的中文短句效果差
+1. **LIKE 性能**：大数据量下需优化为 FTS 或 embedding
+2. **keyword 提取**：中文分词依赖空格/标点，对无空格短句效果差
+3. **scope 过滤是 Python 端**：全量召回后过滤，数据量大时效率低
+4. **entity_refs 匹配是精确匹配**：不支持模糊/同义词
 
 ## 指定给 Codex 的审查重点
 
-1. **Schema Adapter 正确性**：确认 PG→SQLite 转换覆盖了所有必要类型（UUID→TEXT, JSONB→TEXT, TIMESTAMPTZ→TEXT, NUMERIC→REAL）
-2. **conflict_candidate 行为**：确认冲突不出现在 raw_segments，只出现在 uncertainties
-3. **设计文档同步**：确认 Planner/context_assemble 已标注 M2+，文件清单与实际代码一致
-4. **seed data 与 schema v0.4 兼容性**：确认 conftest 的 INSERT 列与 `001_asset_core.sql` v0.4 一致
-
-## 提交记录
-
-```
-88125cf [claude-serving]: add aiosqlite dependency for dev mode SQLite
-778cd83 [claude-serving]: add Pydantic request/response models
-4ff8f6a [claude-serving]: add schema adapter to generate SQLite DDL from shared asset schema
-657375f [claude-serving]: add test fixtures with schema from shared contract and conflict_candidate seed
-204c78d [claude-serving]: post plan revision notice and update message index
-162ad78 [claude-serving]: revise impl plan v1.1 — fix Codex review P1-P2
-aaa6edc [claude-serving]: publish M1 Agent Serving implementation plan
-9073161 [claude-serving]: publish M1 agent serving design document
-5269e6d [claude-serving]: submit M1 design and update task tracking
-cb2541c [claude-serving]: add core query pipeline (AssetRepository, Normalizer, Assembler)
-ed293bd [claude-serving]: add search API endpoints with DB injection and integration tests
-```
+1. **v0.5 字段对齐**：确认所有读取路径已从旧字段迁移到 entity_refs_json/scope_json/block_type/semantic_role
+2. **QueryPlan 接口是否足够**：是否能支持后续 LLM planner 接入
+3. **conflict 分离是否完整**：确认 conflict_candidate 不出现在 evidence_items
+4. **seed data 是否模拟了合理的 Mining v0.5 产出**：scope_json/entity_refs_json 结构是否符合 Mining 写入格式
+5. **`/command-usage` 是否正确走了通用路径**：不是独立 SQL 路径
