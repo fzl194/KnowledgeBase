@@ -1,4 +1,4 @@
-"""Pipeline data objects for M1 Knowledge Mining."""
+"""Pipeline data objects for M1 Knowledge Mining — aligned with asset schema v0.5."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -6,28 +6,49 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class BatchParams:
+    """Batch-level parameters passed from CLI or future frontend."""
+
+    default_source_type: str = "folder_scan"
+    default_document_type: str | None = None
+    batch_scope: dict[str, Any] = field(default_factory=dict)
+    tags: list[str] = field(default_factory=list)
+    storage_root_uri: str | None = None
+    original_root_name: str | None = None
+
+
+@dataclass(frozen=True)
 class RawDocumentData:
-    """Output of ingestion: raw document content + metadata."""
+    """Output of ingestion: raw document content + v0.5 metadata."""
 
     file_path: str
+    relative_path: str
+    file_name: str
+    file_type: str  # markdown, html, pdf, doc, docx, txt, other
     content: str
-    frontmatter: dict[str, Any] = field(default_factory=dict)
-    manifest_meta: dict[str, Any] = field(default_factory=dict)
+    content_hash: str
+    source_uri: str = ""
+    source_type: str | None = None
+    document_type: str | None = None
+    title: str | None = None
+    scope_json: dict[str, Any] = field(default_factory=dict)
+    tags_json: list[str] = field(default_factory=list)
+    structure_quality: str = "unknown"
+    processing_profile_json: dict[str, Any] = field(default_factory=dict)
+    metadata_json: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class DocumentProfile:
-    """Document classification: source_type, document_type, scope, tags."""
+    """Document classification derived from BatchParams + file metadata."""
 
-    file_path: str
+    document_key: str
     source_type: str = "other"
     document_type: str | None = None
     scope_json: dict[str, Any] = field(default_factory=dict)
     tags_json: list[str] = field(default_factory=list)
-    product: str | None = None
-    product_version: str | None = None
-    network_element: str | None = None
     structure_quality: str = "unknown"
+    title: str | None = None
 
 
 @dataclass(frozen=True)
@@ -52,46 +73,54 @@ class SectionNode:
 
 @dataclass(frozen=True)
 class RawSegmentData:
-    """L0 segment output from segmentation."""
+    """L0 segment output from segmentation — aligned with v0.5 raw_segments."""
 
-    document_file_path: str
+    document_key: str
     segment_index: int
-    section_path: list[str]
-    section_title: str | None
-    heading_level: int | None
-    segment_type: str  # command, parameter, example, note, table, paragraph, concept, other
     block_type: str = "unknown"
-    section_role: str | None = None
+    semantic_role: str = "unknown"
+    section_path: list[dict[str, Any]] = field(default_factory=list)
+    section_title: str | None = None
     raw_text: str = ""
     normalized_text: str = ""
     content_hash: str = ""
     normalized_hash: str = ""
     token_count: int | None = None
-    command_name: str | None = None
     structure_json: dict[str, Any] = field(default_factory=dict)
     source_offsets_json: dict[str, Any] = field(default_factory=dict)
+    entity_refs_json: list[dict[str, str]] = field(default_factory=list)
+    metadata_json: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class CanonicalSegmentData:
-    """L1 canonical segment after dedup."""
+    """L1 canonical segment after dedup — aligned with v0.5 canonical_segments."""
 
     canonical_key: str
-    segment_type: str
-    title: str | None
-    canonical_text: str
-    search_text: str
-    has_variants: bool
-    variant_policy: str
-    command_name: str | None
-    raw_segment_refs: list[str]
-    section_role: str | None = None
+    block_type: str = "unknown"
+    semantic_role: str = "unknown"
+    canonical_text: str = ""
+    search_text: str = ""
+    title: str | None = None
+    summary: str | None = None
+    entity_refs_json: list[dict[str, str]] = field(default_factory=list)
+    scope_json: dict[str, Any] = field(default_factory=dict)
+    has_variants: bool = False
+    variant_policy: str = "none"
+    quality_score: float | None = None
+    metadata_json: dict[str, Any] = field(default_factory=dict)
+    raw_segment_refs: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
 class SourceMappingData:
-    """L2 source mapping: canonical → raw segments."""
+    """L2 source mapping: canonical → raw segments — aligned with v0.5."""
 
     canonical_key: str
     raw_segment_ref: str
-    relation_type: str  # primary, exact_duplicate, near_duplicate, version_variant, product_variant, ne_variant
+    relation_type: str  # primary, exact_duplicate, normalized_duplicate, near_duplicate, scope_variant, conflict_candidate
+    is_primary: bool = False
+    priority: int = 100
+    similarity_score: float | None = None
+    diff_summary: str | None = None
+    metadata_json: dict[str, Any] = field(default_factory=dict)

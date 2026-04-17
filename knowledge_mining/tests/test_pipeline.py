@@ -1,138 +1,261 @@
-"""Integration test: end-to-end pipeline with synthetic Markdown."""
+"""End-to-end pipeline test with temp mixed directory (md+txt+html+pdf)."""
+from __future__ import annotations
+
 import tempfile
+import time
 from pathlib import Path
 
 from knowledge_mining.mining.db import MiningDB
 from knowledge_mining.mining.jobs.run import run_pipeline
+from knowledge_mining.mining.models import BatchParams
 
 
-def _write_files(tmp: Path, files: dict[str, str]) -> None:
+def _write_files(tmp: Path, files: dict[str, str | bytes]) -> None:
     for name, content in files.items():
         p = tmp / name
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
+        if isinstance(content, bytes):
+            p.write_bytes(content)
+        else:
+            p.write_text(content, encoding="utf-8")
 
 
-SYNTHETIC_DOCS = {
-    "cmd_add_apn.md": """# ADD APN
+MIXED_DOCS = {
+    "readme.md": """# ADD APN
 
-ADD APN命令用于配置APN地址池
+ADD APN command configures APN settings.
 
-## 参数说明
+## Parameters
 
-| 参数 | 类型 | 说明 |
-|-----|------|------|
-| APN名称 | String | APN的名称 |
-| 地址池ID | Integer | 地址池标识 |
+| Param | Type | Description |
+|-------|------|-------------|
+| APNNAME | String | APN name |
+| POOLID | Integer | Pool identifier |
 
-## 示例
+## Example
 
 ```
 ADD APN:APNNAME="internet",POOLID=1;
 ```
 """,
-    "cmd_mod_apn.md": """# MOD APN
+    "notes.txt": """Network Slicing Overview
 
-MOD APN命令用于修改APN配置
-
-## 参数说明
-
-| 参数 | 类型 | 说明 |
-|-----|------|------|
-| APN名称 | String | APN的名称 |
-| 地址池ID | Integer | 地址池标识 |
-
-## 示例
-
-```
-MOD APN:APNNAME="internet",POOLID=2;
-```
+Network slicing is a key 5G core technology that allows multiple virtual networks
+on the same physical infrastructure. Each slice can have different SLA requirements
+including bandwidth, latency, and reliability targets.
 """,
-    "feature_overview.md": """# 网络切片特性概述
-
-网络切片是5G核心网的关键技术之一。
-
-## 功能介绍
-
-网络切片允许在同一物理网络上创建多个虚拟网络。
-
-## 注意事项
-
-切片配置需要提前规划好SLA需求。
-
-<table>
-<tr><td>参数</td><td>值</td></tr>
-<tr><td>最大切片数</td><td>8</td></tr>
-</table>
-""",
+    "page.html": """<html><body><h1>Configuration Guide</h1><p>HTML content</p></body></html>""",
+    "manual.pdf": b"%PDF-1.4 fake pdf content for testing",
 }
 
 
-def test_pipeline_end_to_end():
-    """Full pipeline: ingest → profile → structure → segment → canonicalize → publish."""
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = Path(tmp)
-        _write_files(tmp, SYNTHETIC_DOCS)
+class TestPipelineEndToEnd:
+    def test_mixed_file_types(self):
+        """Full pipeline with md+txt+html+pdf."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _write_files(tmp, MIXED_DOCS)
 
-        db_path = tmp / "output.sqlite"
-        summary = run_pipeline(tmp, db_path)
+            db_path = tmp / "output.sqlite"
+            summary = run_pipeline(tmp, db_path)
 
-        assert summary["documents"] == 3
-        assert summary["segments"] > 0
-        assert summary["canonicals"] > 0
-        assert summary["mappings"] > 0
+            # All 4 files discovered
+            assert summary["discovered_documents"] == 4
+            # md + txt are parsable
+            assert summary["parsed_documents"] == 2
+            # html + pdf are unparsable
+            assert summary["unparsed_documents"] == 2
 
-        # Verify canonical count < segment count (dedup happened)
-        assert summary["canonicals"] < summary["segments"]
+            # Only parsable docs produce segments
+            assert summary["raw_segments"] > 0
 
-        # Verify SQLite content
-        db = MiningDB(db_path)
-        conn = db.connect()
-        try:
-            # Active version
-            cursor = conn.execute("SELECT status FROM asset_publish_versions WHERE status = 'active'")
-            assert cursor.fetchone() is not None
+            # Canonicals exist (dedup may reduce count)
+            assert summary["canonical_segments"] > 0
+            assert summary["source_mappings"] > 0
 
-            # Segments have block_type
-            cursor = conn.execute(
-                "SELECT DISTINCT block_type FROM asset_raw_segments"
+            # Successfully activated
+            assert summary["status"] == "active"
+            assert summary["active_version_id"] is not None
+
+    def test_sqlite_content_verified(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _write_files(tmp, MIXED_DOCS)
+
+            db_path = tmp / "output.sqlite"
+            run_pipeline(tmp, db_path)
+
+            db = MiningDB(db_path)
+            conn = db.connect()
+            try:
+                # Active version exists
+                active = conn.execute(
+                    "SELECT status FROM asset_publish_versions WHERE status = 'active'"
+                ).fetchone()
+                assert active is not None
+
+                # All 4 raw documents
+                doc_count = conn.execute(
+                    "SELECT COUNT(*) FROM asset_raw_documents"
+                ).fetchone()[0]
+                assert doc_count == 4
+
+                # File types present
+                file_types = {
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT DISTINCT file_type FROM asset_raw_documents"
+                    ).fetchall()
+                }
+                assert "markdown" in file_types
+                assert "txt" in file_types
+                assert "html" in file_types
+                assert "pdf" in file_types
+
+                # Segments only from parsable docs
+                seg_count = conn.execute(
+                    "SELECT COUNT(*) FROM asset_raw_segments"
+                ).fetchone()[0]
+                assert seg_count > 0
+
+                # Canonicals exist
+                canon_count = conn.execute(
+                    "SELECT COUNT(*) FROM asset_canonical_segments"
+                ).fetchone()[0]
+                assert canon_count > 0
+
+                # Source mappings link correctly
+                map_count = conn.execute(
+                    "SELECT COUNT(*) FROM asset_canonical_segment_sources"
+                ).fetchone()[0]
+                assert map_count > 0
+
+                # Every canonical has exactly 1 primary source
+                bad = conn.execute(
+                    """SELECT canonical_segment_id, COUNT(*) as cnt
+                       FROM asset_canonical_segment_sources
+                       WHERE is_primary = 1
+                       GROUP BY canonical_segment_id
+                       HAVING cnt != 1"""
+                ).fetchall()
+                assert len(bad) == 0
+            finally:
+                conn.close()
+
+    def test_with_batch_params(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _write_files(tmp, {
+                "doc.md": "# Title\n\nContent",
+                "notes.txt": "Plain text",
+            })
+
+            bp = BatchParams(
+                default_source_type="folder_scan",
+                default_document_type="command",
+                batch_scope={"product": "UDG5000"},
+                tags=["5G", "core"],
             )
-            block_types = {row[0] for row in cursor}
-            assert "table" in block_types or "paragraph" in block_types
+            db_path = tmp / "batch.sqlite"
+            summary = run_pipeline(tmp, db_path, batch_params=bp)
 
-            # Canonicals exist
-            cursor = conn.execute("SELECT count(*) FROM asset_canonical_segments")
-            assert cursor.fetchone()[0] > 0
+            assert summary["status"] == "active"
 
-            # Source mappings link canonical to raw
-            cursor = conn.execute(
-                "SELECT count(*) FROM asset_canonical_segment_sources"
-            )
-            assert cursor.fetchone()[0] > 0
-        finally:
-            conn.close()
+            db = MiningDB(db_path)
+            conn = db.connect()
+            try:
+                import json
+                row = conn.execute(
+                    "SELECT source_type, document_type, scope_json, tags_json FROM asset_raw_documents LIMIT 1"
+                ).fetchone()
+                assert row[0] == "folder_scan"
+                assert row[1] == "command"
+                scope = json.loads(row[2])
+                assert scope["product"] == "UDG5000"
+                tags = json.loads(row[3])
+                assert "5G" in tags
+            finally:
+                conn.close()
 
 
-def test_pipeline_empty_directory():
-    with tempfile.TemporaryDirectory() as tmp:
-        db_path = Path(tmp) / "empty.sqlite"
-        summary = run_pipeline(Path(tmp), db_path)
-        assert summary == {"documents": 0, "segments": 0, "canonicals": 0, "mappings": 0}
+class TestPipelineEdgeCases:
+    def test_empty_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "empty.sqlite"
+            summary = run_pipeline(Path(tmp), db_path)
+            assert summary["discovered_documents"] == 0
+            assert summary["raw_segments"] == 0
 
+    def test_only_unparsable_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _write_files(tmp, {
+                "page.html": "<html></html>",
+                "doc.pdf": b"%PDF fake",
+            })
+            db_path = tmp / "unparsable.sqlite"
+            summary = run_pipeline(tmp, db_path)
 
-def test_pipeline_dedup_reduces_count():
-    """Identical paragraphs in different docs should deduplicate."""
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = Path(tmp)
-        shared_para = "这是一段完全相同的段落文字，出现在多个文档中用于测试去重功能。"
-        _write_files(tmp, {
-            "a.md": f"# Doc A\n\n{shared_para}",
-            "b.md": f"# Doc B\n\n{shared_para}",
-        })
+            assert summary["discovered_documents"] == 2
+            assert summary["unparsed_documents"] == 2
+            assert summary["parsed_documents"] == 0
+            assert summary["raw_segments"] == 0
 
-        db_path = tmp / "dedup.sqlite"
-        summary = run_pipeline(tmp, db_path)
+    def test_dedup_across_documents(self):
+        """Identical content in multiple md files should deduplicate."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            shared = "This is a shared paragraph used in multiple documents for testing."
+            _write_files(tmp, {
+                "a.md": f"# Doc A\n\n{shared}",
+                "b.md": f"# Doc B\n\n{shared}",
+            })
+            db_path = tmp / "dedup.sqlite"
+            summary = run_pipeline(tmp, db_path)
 
-        # 2 docs × at least 1 segment each, but dedup should reduce canonicals
-        assert summary["segments"] >= 2
-        assert summary["canonicals"] < summary["segments"]
+            assert summary["raw_segments"] >= 2
+            assert summary["canonical_segments"] < summary["raw_segments"]
+
+    def test_continuous_publish(self):
+        """Two publishes to same DB: second archives first, new becomes active."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            db_path = tmp / "cont.sqlite"
+
+            # First publish: one doc
+            input1 = tmp / "input1"
+            input1.mkdir()
+            _write_files(input1, {"v1.md": "# Version 1\n\nContent v1"})
+            s1 = run_pipeline(input1, db_path)
+            assert s1["status"] == "active"
+            pv1 = s1["active_version_id"]
+
+            # Ensure different timestamp for batch_code uniqueness
+            time.sleep(1.1)
+
+            # Second publish: two docs (different input dir)
+            input2 = tmp / "input2"
+            input2.mkdir()
+            _write_files(input2, {
+                "v1.md": "# Version 1\n\nContent v1",
+                "v2.md": "# Version 2\n\nContent v2",
+            })
+            s2 = run_pipeline(input2, db_path)
+            assert s2["status"] == "active"
+            pv2 = s2["active_version_id"]
+
+            db = MiningDB(db_path)
+            conn = db.connect()
+            try:
+                st1 = conn.execute(
+                    "SELECT status FROM asset_publish_versions WHERE id = ?",
+                    (pv1,),
+                ).fetchone()[0]
+                st2 = conn.execute(
+                    "SELECT status FROM asset_publish_versions WHERE id = ?",
+                    (pv2,),
+                ).fetchone()[0]
+                assert st1 == "archived"
+                assert st2 == "active"
+            finally:
+                conn.close()

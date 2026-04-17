@@ -1,90 +1,134 @@
-"""Pipeline entry point: orchestrate all mining modules."""
+"""Pipeline entry point: orchestrate all mining modules (v0.5).
+
+Flow: ingest → profile → parse → segment → canonicalize → publish
+Supports plugin injection for EntityExtractor, RoleClassifier, SegmentEnricher.
+"""
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
+from typing import Any
 
 from knowledge_mining.mining.canonicalization import canonicalize
 from knowledge_mining.mining.document_profile import build_profile
+from knowledge_mining.mining.extractors import (
+    EntityExtractor,
+    NoOpEntityExtractor,
+    NoOpSegmentEnricher,
+    RoleClassifier,
+    DefaultRoleClassifier,
+    SegmentEnricher,
+)
 from knowledge_mining.mining.ingestion import ingest_directory
-from knowledge_mining.mining.models import DocumentProfile, RawSegmentData
+from knowledge_mining.mining.models import BatchParams, RawSegmentData
+from knowledge_mining.mining.parsers import create_parser
 from knowledge_mining.mining.publishing import publish
 from knowledge_mining.mining.segmentation import segment_document
-from knowledge_mining.mining.structure import parse_structure
 
 
-def run_pipeline(input_path: Path, db_path: Path) -> dict:
-    """Run the full mining pipeline: ingest → profile → structure → segment → canonicalize → publish.
+def run_pipeline(
+    input_path: Path,
+    db_path: Path,
+    *,
+    batch_params: BatchParams | None = None,
+    entity_extractor: EntityExtractor | None = None,
+    role_classifier: RoleClassifier | None = None,
+    segment_enricher: SegmentEnricher | None = None,
+    chunk_size: int = 300,
+    chunk_overlap: int = 30,
+) -> dict[str, Any]:
+    """Run the full mining pipeline.
 
-    Returns a summary dict with counts.
+    Returns a summary dict with discovery/parse/canonical/publish statistics.
     """
-    # Step 1: Ingest
-    docs = ingest_directory(input_path)
+    extractor = entity_extractor or NoOpEntityExtractor()
+    classifier = role_classifier or DefaultRoleClassifier()
+    enricher = segment_enricher or NoOpSegmentEnricher()
+
+    # Step 1: Ingest — recursive folder scan
+    docs, ingest_summary = ingest_directory(input_path, batch_params)
     if not docs:
-        return {"documents": 0, "segments": 0, "canonicals": 0, "mappings": 0}
+        return {**ingest_summary, "raw_segments": 0, "canonicals": 0,
+                "source_mappings": 0, "active_version_id": None}
 
-    # Step 2: Profile
+    # Step 2: Profile — batch params inheritance
     profiles = [build_profile(d) for d in docs]
-    profile_map = {p.file_path: p for p in profiles}
+    profile_map = {p.document_key: p for p in profiles}
 
-    # Step 3: Structure + Segment
+    # Step 3: Parse + Segment — by file type
     all_segments: list[RawSegmentData] = []
     for doc, profile in zip(docs, profiles):
-        root = parse_structure(doc.content)
-        segments = segment_document(root, profile)
+        file_type = doc.file_type
+        parser = create_parser(file_type, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        doc_root = parser.parse(doc.content, doc.file_name, {})
+
+        if doc_root is None:
+            # Passthrough (html/pdf/doc/docx) — no segments
+            continue
+
+        segments = segment_document(
+            doc_root, profile,
+            role_classifier=classifier,
+            entity_extractor=extractor,
+        )
         all_segments.extend(segments)
 
     # Step 4: Canonicalize
     canonicals, mappings = canonicalize(all_segments, profile_map)
 
     # Step 5: Publish
-    source_type = "folder_scan"
-    if docs[0].manifest_meta:
-        source_type = _map_source_type(docs[0].manifest_meta.get("source_type", "folder_scan"))
-
-    publish(
-        profiles, all_segments, canonicals, mappings,
+    pub_result = publish(
+        documents=docs,
+        segments=all_segments,
+        canonicals=canonicals,
+        source_mappings=mappings,
         db_path=db_path,
-        version_code="v1",
-        batch_code="batch-001",
-        source_type=source_type,
+        batch_params=batch_params,
     )
 
     return {
-        "documents": len(docs),
-        "segments": len(all_segments),
-        "canonicals": len(canonicals),
-        "mappings": len(mappings),
+        **ingest_summary,
+        "raw_segments": len(all_segments),
+        "canonical_segments": len(canonicals),
+        "source_mappings": len(mappings),
+        "active_version_id": pub_result.get("active_version_id"),
+        "status": pub_result.get("status", "unknown"),
+        "version_code": pub_result.get("version_code"),
     }
 
 
-# Valid source types from schema
-_VALID_SOURCE_TYPES = {
-    "manual_upload", "folder_scan", "api_import", "productdoc_export",
-    "official_vendor", "expert_authored", "user_import",
-    "synthetic_coldstart", "other",
-}
-
-# Mapping for known upstream values not in schema
-_SOURCE_TYPE_ALIASES = {
-    "user_reference": "official_vendor",
-}
-
-
-def _map_source_type(raw: str) -> str:
-    """Map source_type to a valid schema value."""
-    if raw in _VALID_SOURCE_TYPES:
-        return raw
-    return _SOURCE_TYPE_ALIASES.get(raw, "other")
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="M1 Knowledge Mining Pipeline")
+    parser = argparse.ArgumentParser(description="M1 Knowledge Mining Pipeline (v0.5)")
     parser.add_argument("--input", required=True, help="Input directory path")
     parser.add_argument("--db", required=True, help="Output SQLite database path")
+    parser.add_argument("--scope", default=None, help="Batch scope as JSON string")
+    parser.add_argument("--default-document-type", default=None,
+                        help="Default document_type for all documents")
+    parser.add_argument("--default-source-type", default="folder_scan",
+                        help="Default source_type (default: folder_scan)")
+    parser.add_argument("--tags", default=None, help="Comma-separated tags")
+    parser.add_argument("--chunk-size", type=int, default=300,
+                        help="TXT chunk size in tokens (default: 300)")
+    parser.add_argument("--chunk-overlap", type=int, default=30,
+                        help="TXT chunk overlap in tokens (default: 30)")
     args = parser.parse_args()
 
-    summary = run_pipeline(Path(args.input), Path(args.db))
+    batch_scope = json.loads(args.scope) if args.scope else {}
+    tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else []
+    batch_params = BatchParams(
+        default_source_type=args.default_source_type,
+        default_document_type=args.default_document_type,
+        batch_scope=batch_scope,
+        tags=tags,
+    )
+
+    summary = run_pipeline(
+        Path(args.input), Path(args.db),
+        batch_params=batch_params,
+        chunk_size=args.chunk_size,
+        chunk_overlap=args.chunk_overlap,
+    )
     print(f"Pipeline complete: {summary}")
 
 

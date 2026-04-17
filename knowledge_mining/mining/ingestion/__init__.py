@@ -1,77 +1,138 @@
-"""Ingestion module: read manifest.jsonl or scan plain Markdown directories."""
+"""Ingestion module: recursive folder scan for v0.5.
+
+Discovers md/txt/html/htm/pdf/doc/docx files. All files are registered as
+raw_documents; only md/txt are parsed into raw_segments later.
+No manifest.jsonl, no frontmatter parsing, no external metadata.
+"""
 from __future__ import annotations
 
-import json
+import hashlib
 from pathlib import Path
+from typing import Any
 
-from knowledge_mining.mining.models import RawDocumentData
+from knowledge_mining.mining.models import BatchParams, RawDocumentData
+
+# Recognized file extensions → file_type mapping
+_EXTENSION_MAP: dict[str, str] = {
+    ".md": "markdown",
+    ".markdown": "markdown",
+    ".txt": "txt",
+    ".html": "html",
+    ".htm": "html",
+    ".pdf": "pdf",
+    ".doc": "doc",
+    ".docx": "docx",
+}
+
+# Extensions eligible for parsing (generate raw_segments)
+PARSABLE_EXTENSIONS = {".md", ".markdown", ".txt"}
+
+# Files to always skip
+_SKIP_NAMES = {
+    "manifest.jsonl", "manifest.json",
+    "html_to_md_mapping.json", "html_to_md_mapping.csv",
+    ".ds_store", "thumbs.db", ".gitkeep",
+}
 
 
-def ingest_directory(input_path: Path) -> list[RawDocumentData]:
-    """Ingest documents from a directory.
+def ingest_directory(
+    input_path: Path,
+    batch_params: BatchParams | None = None,
+) -> tuple[list[RawDocumentData], dict[str, Any]]:
+    """Recursively scan input_path for recognized files.
 
-    Mode A: If manifest.jsonl exists, use it to drive ingestion.
-    Mode B: Otherwise, recursively scan .md files.
+    Returns (documents, summary) where summary contains:
+        discovered_documents, parsed_documents, unparsed_documents,
+        skipped_files, failed_files.
     """
     input_path = Path(input_path)
-    manifest_path = input_path / "manifest.jsonl"
-    if manifest_path.exists():
-        return _ingest_with_manifest(input_path, manifest_path)
-    return _ingest_plain_markdown(input_path)
+    batch_params = batch_params or BatchParams()
 
+    documents: list[RawDocumentData] = []
+    summary: dict[str, Any] = {
+        "discovered_documents": 0,
+        "parsed_documents": 0,
+        "unparsed_documents": 0,
+        "skipped_files": 0,
+        "failed_files": 0,
+    }
 
-def _ingest_with_manifest(input_path: Path, manifest_path: Path) -> list[RawDocumentData]:
-    """Mode A: manifest.jsonl driven ingestion."""
-    results: list[RawDocumentData] = []
-    for line in manifest_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
+    for file_path in sorted(input_path.rglob("*")):
+        if not file_path.is_file():
             continue
-        meta = json.loads(line)
-        doc_path = input_path / meta["path"]
-        if not doc_path.exists():
+
+        # Skip known metadata/system files
+        if file_path.name.lower() in _SKIP_NAMES:
+            summary["skipped_files"] += 1
             continue
-        content = doc_path.read_text(encoding="utf-8")
-        frontmatter = _parse_frontmatter(content)
-        results.append(
-            RawDocumentData(
-                file_path=str(meta["path"]),
+
+        rel_path = file_path.relative_to(input_path)
+        ext = file_path.suffix.lower()
+
+        # Determine file_type
+        file_type = _EXTENSION_MAP.get(ext)
+        if file_type is None:
+            summary["skipped_files"] += 1
+            continue
+
+        summary["discovered_documents"] += 1
+
+        try:
+            content_bytes = file_path.read_bytes()
+            content_hash = hashlib.sha256(content_bytes).hexdigest()
+
+            # Read text content for parsable types; empty string for binary
+            if ext in PARSABLE_EXTENSIONS:
+                content = content_bytes.decode("utf-8", errors="replace")
+                summary["parsed_documents"] += 1
+            else:
+                content = ""
+                summary["unparsed_documents"] += 1
+
+            doc = RawDocumentData(
+                file_path=str(file_path),
+                relative_path=str(rel_path).replace("\\", "/"),
+                file_name=file_path.name,
+                file_type=file_type,
                 content=content,
-                frontmatter=frontmatter,
-                manifest_meta=meta,
+                content_hash=content_hash,
+                source_uri=str(file_path),
+                source_type=batch_params.default_source_type,
+                document_type=batch_params.default_document_type,
+                title=_infer_title(file_path, content, file_type),
+                scope_json=dict(batch_params.batch_scope),
+                tags_json=list(batch_params.tags),
+                structure_quality=_infer_structure_quality(ext),
+                processing_profile_json={},
+                metadata_json={},
             )
-        )
-    return results
+            documents.append(doc)
+        except Exception:
+            summary["failed_files"] += 1
+
+    return documents, summary
 
 
-def _ingest_plain_markdown(input_path: Path) -> list[RawDocumentData]:
-    """Mode B: recursive .md scan."""
-    results: list[RawDocumentData] = []
-    for md_file in sorted(input_path.rglob("*.md")):
-        content = md_file.read_text(encoding="utf-8")
-        frontmatter = _parse_frontmatter(content)
-        rel_path = str(md_file.relative_to(input_path))
-        results.append(
-            RawDocumentData(
-                file_path=rel_path,
-                content=content,
-                frontmatter=frontmatter,
-            )
-        )
-    return results
+def _infer_title(file_path: Path, content: str, file_type: str) -> str | None:
+    """Infer document title: H1 for markdown, filename for others."""
+    if file_type == "markdown" and content:
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("# "):
+                return stripped[2:].strip()
+    return file_path.stem
 
 
-def _parse_frontmatter(content: str) -> dict:
-    """Extract YAML frontmatter from content if present."""
-    if not content.startswith("---"):
-        return {}
-    end = content.find("---", 3)
-    if end == -1:
-        return {}
-    yaml_text = content[3:end].strip()
-    result: dict = {}
-    for line in yaml_text.splitlines():
-        if ":" in line:
-            key, _, value = line.partition(":")
-            result[key.strip()] = value.strip().strip('"').strip("'")
-    return result
+def _infer_structure_quality(ext: str) -> str:
+    """Map extension to structure_quality."""
+    mapping = {
+        ".md": "markdown_native",
+        ".markdown": "markdown_native",
+        ".txt": "plain_text_only",
+        ".html": "full_html",
+        ".htm": "full_html",
+        ".pdf": "unknown",
+        ".doc": "unknown",
+        ".docx": "unknown",
+    }
+    return mapping.get(ext, "unknown")
