@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any, Protocol, runtime_checkable
 
 from knowledge_mining.mining.models import ContentBlock, SectionNode
+from knowledge_mining.mining.text_utils import token_count as _token_count
 
 # Re-export structure parser for MarkdownParser
 from knowledge_mining.mining.structure import parse_structure as _parse_md_structure
@@ -61,7 +62,7 @@ class PlainTextParser:
 
         blocks: list[ContentBlock] = []
         for para_text in paragraphs:
-            tc = _count_tokens(para_text)
+            tc = _token_count(para_text)
             if tc <= self.chunk_size:
                 blocks.append(ContentBlock(block_type="paragraph", text=para_text))
             else:
@@ -118,56 +119,30 @@ def _split_paragraphs(text: str) -> list[str]:
     return paragraphs
 
 
-def _count_tokens(text: str) -> int:
-    """Count tokens (CJK-aware). CJK chars count individually."""
-    count = 0
-    buf = False
-    for ch in text:
-        if "\u4e00" <= ch <= "\u9fff":
-            if buf:
-                count += 1
-                buf = False
-            count += 1
-        elif ch.isalnum():
-            buf = True
-        else:
-            if buf:
-                count += 1
-                buf = False
-    if buf:
-        count += 1
-    return count
-
-
 def _find_token_boundaries(text: str) -> list[int]:
     """Find character positions of token boundaries in text.
 
     Returns a list of character offsets where each token starts.
-    Used for chunking while preserving original text.
+    Uses the same tokenizer logic as text_utils._tokenize so counts are consistent.
     """
-    boundaries = [0]  # Start of text is always a boundary
-    i = 0
-    in_token = False
-    while i < len(text):
-        ch = text[i]
+    boundaries: list[int] = []
+    buf_start: int | None = None
+    for i, ch in enumerate(text):
         if "\u4e00" <= ch <= "\u9fff":
-            if in_token:
-                in_token = False
+            if buf_start is not None:
+                boundaries.append(buf_start)
+                buf_start = None
             boundaries.append(i)
-            i += 1
-            if i < len(text):
-                boundaries.append(i)
         elif ch.isalnum():
-            if not in_token:
-                boundaries.append(i)
-                in_token = True
-            i += 1
+            if buf_start is None:
+                buf_start = i
         else:
-            if in_token:
-                in_token = False
-            i += 1
-    # Remove duplicates and sort
-    return sorted(set(boundaries))
+            if buf_start is not None:
+                boundaries.append(buf_start)
+                buf_start = None
+    if buf_start is not None:
+        boundaries.append(buf_start)
+    return boundaries
 
 
 def _split_long_text(

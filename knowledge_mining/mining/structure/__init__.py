@@ -69,10 +69,16 @@ def _tokens_to_blocks(tokens: list) -> list[ContentBlock]:
             items: list[str] = []
             line_start = tok.map[0] if tok.map else None
             j = i + 1
+            depth = 1
             while j < len(tokens):
-                if tokens[j].type == close_type:
-                    break
-                if tokens[j].type == "inline":
+                if tokens[j].type in ("bullet_list_open", "ordered_list_open"):
+                    depth += 1
+                elif tokens[j].type == close_type:
+                    depth -= 1
+                    if depth == 0:
+                        break
+                # Only collect items at the outermost list level
+                if depth == 1 and tokens[j].type == "inline":
                     items.append(tokens[j].content)
                 j += 1
             line_end = tok.map[1] if tok.map else None
@@ -286,18 +292,10 @@ def _build_nested_section(blocks: list[ContentBlock]) -> SectionNode:
             blocks=tuple(content_blocks),
         )
 
-    # Split content into direct blocks and sub-sections
-    # Direct blocks: everything before the first sub-heading
-    # Sub-sections: from each sub-heading to the next same-or-higher-level heading
+    # Split content into direct blocks and sub-sections using _split_sub_sections
     direct_blocks: list[ContentBlock] = []
     children: list[SectionNode] = []
 
-    # Collect blocks before first sub-heading
-    first_sub = sub_heading_indices[0]
-    direct_blocks = [b for b in content_blocks[:first_sub] if b.block_type != "heading"]
-
-    # Build sub-sections by finding groups of consecutive sub-headings at the same level
-    # and their content until the next heading at the same or lower level
     sub_sections_raw = _split_sub_sections(content_blocks, heading_level)
 
     for sub_section_blocks in sub_sections_raw:

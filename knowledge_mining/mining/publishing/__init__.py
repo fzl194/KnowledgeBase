@@ -67,6 +67,7 @@ def publish(
     db = MiningDB(db_path)
     db.create_tables()
     conn = db.connect()
+    pv_id: str | None = None
 
     try:
         # Step 1: Create batch + staging version
@@ -137,10 +138,13 @@ def publish(
         seg_ids: dict[str, str] = {}
         for seg in segments:
             seg_key = f"{seg.document_key}#{seg.segment_index}"
+            raw_doc_id = doc_ids.get(seg.document_key)
+            if not raw_doc_id:
+                raise ValueError(f"raw_document not found for segment: {seg.document_key}")
             seg_id = db.insert_raw_segment(
                 conn,
                 publish_version_id=pv_id,
-                raw_document_id=doc_ids.get(seg.document_key, ""),
+                raw_document_id=raw_doc_id,
                 segment_key=seg_key,
                 segment_index=seg.segment_index,
                 block_type=seg.block_type,
@@ -183,11 +187,17 @@ def publish(
 
         # Step 5: Insert source mappings
         for mapping in source_mappings:
+            canon_id = canon_ids.get(mapping.canonical_key)
+            seg_map_id = seg_ids.get(mapping.raw_segment_ref)
+            if not canon_id:
+                raise ValueError(f"canonical not found for mapping: {mapping.canonical_key}")
+            if not seg_map_id:
+                raise ValueError(f"raw_segment not found for mapping: {mapping.raw_segment_ref}")
             db.insert_source_mapping(
                 conn,
                 publish_version_id=pv_id,
-                canonical_segment_id=canon_ids.get(mapping.canonical_key, ""),
-                raw_segment_id=seg_ids.get(mapping.raw_segment_ref, ""),
+                canonical_segment_id=canon_id,
+                raw_segment_id=seg_map_id,
                 relation_type=mapping.relation_type,
                 is_primary=mapping.is_primary,
                 priority=mapping.priority,
@@ -238,8 +248,9 @@ def publish(
 
     except Exception as e:
         try:
-            db.fail_version(conn, pv_id, str(e))
-            conn.commit()
+            if pv_id is not None:
+                db.fail_version(conn, pv_id, str(e))
+                conn.commit()
         except Exception:
             pass
         raise

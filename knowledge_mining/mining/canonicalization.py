@@ -87,29 +87,28 @@ def canonicalize(
 
     # Layer 3: near duplicates (simhash + Jaccard) — then singletons
     remaining = [seg for seg in segments if _seg_key(seg) not in assigned]
+    layer3_assigned: set[int] = set()
 
-    i = 0
-    while i < len(remaining):
-        seg = remaining[i]
+    for i, seg in enumerate(remaining):
+        if i in layer3_assigned:
+            continue
         group = [seg]
-        j = i + 1
-        while j < len(remaining):
+        fp1 = simhash_fingerprint(seg.raw_text)
+        for j in range(i + 1, len(remaining)):
+            if j in layer3_assigned:
+                continue
             other = remaining[j]
-            fp1 = simhash_fingerprint(seg.raw_text)
             fp2 = simhash_fingerprint(other.raw_text)
             if (hamming_distance(fp1, fp2) <= _SIMHASH_THRESHOLD
                     and jaccard_similarity(seg.raw_text, other.raw_text) >= _JACCARD_THRESHOLD):
                 group.append(other)
-                remaining.pop(j)
-            else:
-                j += 1
+                layer3_assigned.add(j)
         canonical, group_mappings = _create_canonical_group(
             group, profiles, f"c{canonical_idx:06d}",
         )
         canonical_idx += 1
         canonicals.append(canonical)
         mappings.extend(group_mappings)
-        i += 1
 
     return canonicals, mappings
 
