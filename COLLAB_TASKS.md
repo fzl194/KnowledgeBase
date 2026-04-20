@@ -40,53 +40,6 @@
 
 ## 活跃任务
 
-## TASK-20260415-m1-knowledge-mining
-- 标题：M1 Knowledge Mining / 原始语料与归并语料生产
-- 级别：正式
-- 状态：Codex 复审 P1-P2 修复完成，209 测试通过，待 Codex 复审
-- 当前阶段：Claude Mining 已完成 Codex 复审全部 6 项修复（发布事务隔离、跳级 heading、混合嵌套 list、list 独立切片、source_offsets line 信息、轻量语义增强），209 测试通过，待 Codex 复审
-- Claude：负责 `knowledge_mining/**`，提交前缀 `[claude-mining]:`，已完成 Codex 复审 P1-P2 修复
-- Codex：已定义任务边界、资产三层模型与禁止修改范围；已完成 v0.5 fix 复审，要求继续修 active 失败隔离、Markdown 跳级 heading、混合嵌套 list 等问题
-- 管理员：用户要求该任务与 Agent Serving 任务独立并行开发
-- 计划文档：
-  - `docs/plans/2026-04-16-m1-knowledge-mining-design.md`
-  - `docs/plans/2026-04-16-m1-knowledge-mining-impl-plan.md`
-  - `docs/plans/2026-04-17-m1-knowledge-mining-v05-revision-plan.md`（v0.5 修订计划）
-- 交接文档：
-  - `docs/handoffs/2026-04-17-m1-knowledge-mining-claude-handoff.md`（v1.1 handoff）
-  - `docs/handoffs/2026-04-17-m1-knowledge-mining-claude-v05-revision.md`（v0.5 修正 handoff）
-- 审查文档：
-  - `docs/analysis/2026-04-16-m1-knowledge-mining-plan-codex-review.md`
-  - `docs/analysis/2026-04-17-m1-knowledge-mining-v05-codex-review.md`
-  - `docs/analysis/2026-04-20-m1-knowledge-mining-fix-codex-review.md`
-- 修复文档：
-- 管理员文档：
-  - `docs/architecture/2026-04-15-mining-serving-parallel-design.md`
-- 最新消息序号：MSG-20260420-141000-claude
-- 备注：本任务禁止修改 `agent_serving/**` 与 `skills/cloud_core_knowledge/**`；如需改共享 schema，必须先在消息中说明兼容性影响。
-
-## TASK-20260415-m1-agent-serving
-- 标题：M1 Agent Serving / 归并语料检索与差异下钻
-- 级别：正式
-- 状态：Codex review P1-P3 修复 + 自查修复完成，73/73 测试通过，待 Codex 复审
-- 当前阶段：Claude Serving 已完成 Codex review 全部 12 项修复 + python-reviewer 自查修复（外部化配置、immutability、SQL安全、N+1优化、契约测试）
-- Claude：负责 `agent_serving/**` 与 `skills/cloud_core_knowledge/**`，提交前缀 `[claude-serving]:`，Codex review 修复 + 自查修复已完成
-- Codex：已定义任务边界、运行态只读约束与禁止修改范围；已完成 v0.5 fix 复审，要求继续修真实 Mining DB 召回排序、scope 维度覆盖、source audit 信息和契约测试强度
-- 管理员：用户要求该任务与 Knowledge Mining 任务独立并行开发
-- 计划文档：
-  - `docs/plans/2026-04-15-m1-agent-serving-design.md`
-  - `docs/plans/2026-04-15-m1-agent-serving-impl-plan.md`
-- 交接文档：`docs/handoffs/2026-04-17-m1-agent-serving-claude-handoff.md`
-- 审查文档：
-  - `docs/analysis/2026-04-16-m1-agent-serving-codex-review.md`
-  - `docs/analysis/2026-04-17-m1-agent-serving-v05-codex-review.md`
-  - `docs/analysis/2026-04-20-m1-agent-serving-fix-codex-review.md`
-- 修复文档：
-- 管理员文档：
-  - `docs/architecture/2026-04-15-mining-serving-parallel-design.md`
-- 最新消息序号：MSG-20260420-110500-codex
-- 备注：本任务禁止修改 `knowledge_mining/**` 与 `knowledge_assets/dictionaries/**`；如需改共享 schema，必须先在消息中说明兼容性影响。
-
 ## 已完成任务
 
 ### 说明
@@ -110,4 +63,51 @@
 - 修复文档：`docs/archive/2026-04/TASK-20260415-cloud-core-architecture/handoffs/2026-04-15-m0-claude-fix.md`
 - 管理员文档：
 - 最新消息序号：MSG-20260415-172000-codex（已归档至 `docs/archive/2026-04/TASK-20260415-cloud-core-architecture/messages/TASK-20260415-cloud-core-architecture.md`）
-- 备注：架构文档为 `docs/architecture/2026-04-15-cloud-core-agent-knowledge-architecture.md`；并行开发上下文为 `docs/architecture/2026-04-15-mining-serving-parallel-design.md`，仍由后续 M1 任务原位引用，不归档。旧代码仅作为 `old/` 参考，不作为新系统 import 依赖。
+- 备注：架构文档为 `docs/architecture/2026-04-15-cloud-core-agent-knowledge-architecture.md`；并行开发上下文为 `docs/architecture/2026-04-15-mining-serving-parallel-design.md`，作为 M1 历史与 1.1 讨论参考原位保留，不归档。旧代码仅作为 `old/` 参考，不作为新系统 import 依赖。
+
+## TASK-20260415-m1-knowledge-mining
+- 标题：M1 Knowledge Mining / 原始语料与归并语料生产
+- 级别：正式
+- 状态：已收口归档；后续 1.1 演进另建任务承接
+- 当前阶段：M1 实现与多轮修复讨论已结束，任务文档已归档
+- Claude：已完成 M1 与 v0.5 修订实现，并完成 Codex 复审后 6 项修复
+- Codex：已完成计划审查、v0.5 实现审查、fix 复审与归档收口
+- 管理员：2026-04-20 要求原 M1 任务收口，转入 1.1 数据库 / Mining / Serving 重写讨论
+- 计划文档：
+  - `docs/archive/2026-04/TASK-20260415-m1-knowledge-mining/plans/2026-04-16-m1-knowledge-mining-design.md`
+  - `docs/archive/2026-04/TASK-20260415-m1-knowledge-mining/plans/2026-04-16-m1-knowledge-mining-impl-plan.md`
+  - `docs/archive/2026-04/TASK-20260415-m1-knowledge-mining/plans/2026-04-17-m1-knowledge-mining-v05-revision-plan.md`
+- 交接文档：
+  - `docs/archive/2026-04/TASK-20260415-m1-knowledge-mining/handoffs/2026-04-17-m1-knowledge-mining-claude-handoff.md`
+  - `docs/archive/2026-04/TASK-20260415-m1-knowledge-mining/handoffs/2026-04-17-m1-knowledge-mining-claude-v05-revision.md`
+- 审查文档：
+  - `docs/archive/2026-04/TASK-20260415-m1-knowledge-mining/analysis/2026-04-16-m1-knowledge-mining-plan-codex-review.md`
+  - `docs/archive/2026-04/TASK-20260415-m1-knowledge-mining/analysis/2026-04-17-m1-knowledge-mining-v05-codex-review.md`
+  - `docs/archive/2026-04/TASK-20260415-m1-knowledge-mining/analysis/2026-04-20-m1-knowledge-mining-fix-codex-review.md`
+- 修复文档：
+- 管理员文档：
+  - `docs/architecture/2026-04-15-mining-serving-parallel-design.md`（共享架构上下文，原位保留）
+- 最新消息序号：MSG-20260420-173600-codex（已归档至 `docs/archive/2026-04/TASK-20260415-m1-knowledge-mining/messages/TASK-20260415-m1-knowledge-mining.md`）
+- 备注：本任务作为 M1 历史基线保留。1.1 不在该任务内继续追加补丁。
+
+## TASK-20260415-m1-agent-serving
+- 标题：M1 Agent Serving / 归并语料检索与差异下钻
+- 级别：正式
+- 状态：已收口归档；后续 1.1 Serving 重写另建任务承接
+- 当前阶段：M1 实现与多轮修复讨论已结束，任务文档已归档
+- Claude：已完成 M1 与 v0.5 泛化修订实现，并完成 Codex 复审后修复
+- Codex：已完成设计审查、v0.5 实现审查、fix 复审与归档收口
+- 管理员：2026-04-20 要求原 M1 任务收口，转入 1.1 数据库 / Mining / Serving 重写讨论
+- 计划文档：
+  - `docs/archive/2026-04/TASK-20260415-m1-agent-serving/plans/2026-04-15-m1-agent-serving-design.md`
+  - `docs/archive/2026-04/TASK-20260415-m1-agent-serving/plans/2026-04-15-m1-agent-serving-impl-plan.md`
+- 交接文档：`docs/archive/2026-04/TASK-20260415-m1-agent-serving/handoffs/2026-04-17-m1-agent-serving-claude-handoff.md`
+- 审查文档：
+  - `docs/archive/2026-04/TASK-20260415-m1-agent-serving/analysis/2026-04-16-m1-agent-serving-codex-review.md`
+  - `docs/archive/2026-04/TASK-20260415-m1-agent-serving/analysis/2026-04-17-m1-agent-serving-v05-codex-review.md`
+  - `docs/archive/2026-04/TASK-20260415-m1-agent-serving/analysis/2026-04-20-m1-agent-serving-fix-codex-review.md`
+- 修复文档：
+- 管理员文档：
+  - `docs/architecture/2026-04-15-mining-serving-parallel-design.md`（共享架构上下文，原位保留）
+- 最新消息序号：MSG-20260420-173700-codex（已归档至 `docs/archive/2026-04/TASK-20260415-m1-agent-serving/messages/TASK-20260415-m1-agent-serving.md`）
+- 备注：本任务作为 M1 历史基线保留。Serving 1.1 应按通用 Agent Knowledge Backend 重写，不在该任务内继续追加补丁。
