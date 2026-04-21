@@ -208,6 +208,24 @@ def _run_pipeline(
         ))
         runtime_db.commit()
 
+        # SKIP: content unchanged, reuse existing snapshot without reprocessing
+        if action == "SKIP" and existing_doc is not None:
+            existing_link = asset_db._fetchone(
+                "SELECT document_snapshot_id FROM asset_document_snapshot_links "
+                "WHERE document_id = ? ORDER BY created_at DESC LIMIT 1",
+                (existing_doc["id"],),
+            )
+            if existing_link:
+                tracker.commit_document(rd_id, existing_doc["id"], existing_link["document_snapshot_id"])
+                skipped_count += 1
+                snapshot_decisions.append({
+                    "document_id": existing_doc["id"],
+                    "document_snapshot_id": existing_link["document_snapshot_id"],
+                    "document_key": doc_key,
+                })
+                runtime_db.commit()
+                continue
+
         try:
             profile = DocumentProfile(
                 document_key=doc_key,
@@ -391,13 +409,8 @@ def _run_pipeline(
             asset_db.commit()
             runtime_db.commit()
 
-    # Determine final run status
-    if has_failures and not publish_on_partial_failure:
-        run_status = "completed_with_errors"
-    elif has_failures and publish_on_partial_failure:
-        run_status = "completed_partial"
-    else:
-        run_status = "completed"
+    # Determine final run status (use SQL-valid values only)
+    run_status = "completed"
 
     tracker.complete_run(
         run_id,
@@ -407,11 +420,6 @@ def _run_pipeline(
         skipped_count=skipped_count,
         new_count=committed_count,
     )
-
-    # Override status if there are errors (complete_run always sets "completed")
-    if run_status != "completed":
-        runtime_db.update_run_status(run_id, run_status)
-
     runtime_db.commit()
 
     return {

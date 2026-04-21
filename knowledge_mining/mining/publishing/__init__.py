@@ -58,11 +58,8 @@ def classify_documents(
     return snapshot_decisions
 
 
-def determine_build_mode(
-    snapshot_decisions: list[dict[str, Any]],
-    has_prev_build: bool,
-) -> str:
-    """Determine build mode based on document actions.
+def determine_build_mode(has_prev_build: bool) -> str:
+    """Determine build mode based on whether a previous active build exists.
 
     Returns "full" if no previous build exists, otherwise "incremental".
     """
@@ -92,7 +89,7 @@ def assemble_build(
     """
     prev_build = asset_db.get_active_build()
     has_prev = prev_build is not None
-    build_mode = determine_build_mode(snapshot_decisions, has_prev)
+    build_mode = determine_build_mode(has_prev)
     parent_build_id = prev_build["id"] if has_prev else None
 
     build_id = uuid.uuid4().hex

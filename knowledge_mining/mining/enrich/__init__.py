@@ -15,6 +15,7 @@ v1.2 can inject LLM-backed implementations without changing segmentation or retr
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Protocol, runtime_checkable
 
 from knowledge_mining.mining.extractors import (
@@ -59,7 +60,6 @@ class RuleBasedEnricher:
         **kwargs: Any,
     ) -> list[RawSegmentData]:
         """Apply entity extraction, role classification, and metadata enrichment."""
-        enriched: list[RawSegmentData] = []
         result: list[RawSegmentData] = []
         for seg in segments:
             result.append(_enrich_one(seg, self._extractor, self._classifier))
@@ -179,14 +179,14 @@ def _add_section_context_entities(
     existing: list[dict[str, str]],
 ) -> list[dict[str, str]]:
     """Add section-title-derived entities if not already present."""
-    seen = {(r["type"], r["name"]) for r in existing}
+    refs = list(existing)  # defensive copy
+    seen = {(r["type"], r["name"]) for r in refs}
 
-    import re
     cmd_match = re.match(r"^(ADD|SHOW|MOD|DEL|DSP|LST|REG|DEREG)\s+(\S+)", section_title.upper())
     if cmd_match:
         cmd_name = f"{cmd_match.group(1)} {cmd_match.group(2)}"
         key = ("command", cmd_name)
         if key not in seen:
-            existing.append({"type": "command", "name": cmd_name})
+            refs.append({"type": "command", "name": cmd_name})
 
-    return existing
+    return refs
