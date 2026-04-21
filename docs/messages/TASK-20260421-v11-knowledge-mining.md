@@ -37,3 +37,73 @@
   - 先产出 v1.1 Mining 实现计划，明确保留哪些旧代码、移除哪些旧主链、哪些模块重写。
   - 实现后给出可验证的端到端链路：输入目录 -> committed snapshots -> build -> active release。
   - 测试至少覆盖：共享 snapshot、断点续跑、build/release 正确性。
+
+## MSG-20260421-160000-claude-mining
+- 时间：2026-04-21 16:00
+- From：Claude Mining
+- To：Codex
+- 类型：plan-ready
+- 关联文件：`docs/plans/2026-04-21-v11-knowledge-mining-impl-plan.md`
+- 内容：
+  - v3 实现计划已定稿，核心决策：
+    1. Pipeline 7 阶段：ingest → parse → segment → enrich → build_relations → build_retrieval_units → publish
+    2. enrich 为正式阶段（v1.1 rule-based，v1.2 LLM 替换）
+    3. Shared snapshot 三层模型（document + snapshot + link），保守归一化 hash
+    4. Relations 两层：结构关系(v1.1) + 语义关系(v1.2)，同一张表
+    5. Retrieval units：raw_text + contextual_text + generated_question（LLM 可选）
+    6. Build merge 语义：上一个 active build + 本轮变更集
+    7. Publish 强制显式 run_id
+    8. Heading 独立落库，支持 section_header_of
+    9. 工业级演进路线：v1.2 LLM 增强 → v1.3 跨文档实体合并+社区检测 → v1.4+ 持续演进
+  - v1.1/v1.2 零表变更，所有抽取结果写入现有 JSON 字段
+  - 旧代码移到 old/knowledge_mining_m1/，parsers/structure/segmentation/text_utils 参考复用
+  - Task 拆解 5 批次 15 个 Task，现在开始执行
+- 预期动作：Codex 审查计划，开始实现
+
+## MSG-20260421-200000-claude-mining
+- 时间：2026-04-21 20:00
+- From：Claude Mining
+- To：Codex
+- 类型：handoff-note
+- 关联文件：
+  - `knowledge_mining/mining/models.py`
+  - `knowledge_mining/mining/db.py`
+  - `knowledge_mining/mining/hash_utils.py`
+  - `knowledge_mining/mining/jobs/run.py`
+  - `knowledge_mining/README.md`
+  - `knowledge_mining/tests/test_v11_pipeline.py`
+- 内容：
+  - v1.1 Knowledge Mining 全量实现完成，6 次提交，30 测试通过
+  - 实现范围：
+    - T0: 旧代码移到 old/knowledge_mining_m1/
+    - T1-T3: models.py（12 frozen dataclass）、db.py（AssetCoreDB + MiningRuntimeDB）、hash_utils.py
+    - T4-T7: text_utils、ingestion、parsers、structure、segmentation、extractors、runtime tracker
+    - T8-T13: enrich、relations、retrieval_units、snapshot、publishing、jobs/run.py 编排器
+    - T14-T15: 30 测试用例 + README 更新
+  - 端到端验证：3 docs → 17 segments → 8 headings → 89 relations → 34 retrieval units → active release
+  - 两阶段 pipeline：`run()` 和 `publish()` 两个入口
+  - 共享 snapshot、build merge、release chain 全部落地
+  - mining_runtime 阶段事件完整覆盖 9 个 stage
+  - RuntimeTracker 支持 build_resume_plan（断点续跑计划）
+- 预期动作：Codex 审查实现，确认是否符合 v1.1 契约
+
+## MSG-20260421-213000-claude-mining
+- 时间：2026-04-21 21:30
+- From：Claude Mining
+- To：Codex
+- 类型：handoff-note
+- 关联文件：
+  - `docs/handoffs/2026-04-21-v11-knowledge-mining-claude-mining-handoff.md`
+  - `knowledge_mining/mining/db.py`
+  - `knowledge_mining/mining/runtime/__init__.py`
+  - `knowledge_mining/mining/jobs/run.py`
+  - `knowledge_mining/mining/ingestion/__init__.py`
+- 内容：
+  - 自查修复完成，3 CRITICAL + 3 HIGH 全部修复并提交
+  - 修复要点：
+    1. upsert_document / upsert_snapshot ON CONFLICT 后读回实际 row id
+    2. 非可解析文件使用 raw_hash 作为 normalized_content_hash fallback
+    3. build_id 从 **counters 分离为显式参数（db.py → runtime → jobs/run.py）
+  - 30 测试全部通过
+  - 已提交 handoff 文档，请 Codex 审查
+- 预期动作：Codex 审查 v1.1 Mining 实现 + 自查修复

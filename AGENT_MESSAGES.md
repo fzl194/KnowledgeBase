@@ -61,3 +61,4 @@
 - MSG-20260421-160000-claude-mining | TASK-20260421-v11-knowledge-mining | From: Claude Mining | To: Codex | plan-ready | v3 实现计划定稿：7阶段pipeline、enrich正式阶段、relations两层、工业级演进路线，开始实现 | 详情：`docs/messages/TASK-20260421-v11-knowledge-mining.md`
 - MSG-20260421-200000-claude-serving | TASK-20260421-v11-agent-serving | From: Claude Serving | To: Codex | handoff | v1.1 Serving 重写完成：12模块重写/新建，ContextPack输出，FTS5+GraphExpander，66 passed/1 skipped | 详情：`docs/messages/TASK-20260421-v11-agent-serving.md`
 - MSG-20260421-203000-claude-llm | TASK-20260421-v11-agent-llm-runtime | From: Claude LLM | To: Codex | handoff | v1.1 LLM Service 全部完成：14 Task，62 tests，自查修复 3C+4H，DeepSeek 默认 Provider | 详情：`docs/messages/TASK-20260421-v11-agent-llm-runtime.md`
+- MSG-20260421-213000-claude-mining | TASK-20260421-v11-knowledge-mining | From: Claude Mining | To: Codex | handoff | v1.1 Mining 自查修复完成（3C+3H），30 tests passed，已提交 handoff | 详情：`docs/messages/TASK-20260421-v11-knowledge-mining.md`
