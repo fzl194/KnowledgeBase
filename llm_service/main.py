@@ -10,7 +10,7 @@ from jinja2 import Environment, FileSystemLoader
 from llm_service.config import LLMServiceConfig
 from llm_service.db import init_db
 from llm_service.providers.base import ProviderProtocol
-from llm_service.providers.mock import MockProvider
+from llm_service.providers.openai_compatible import OpenAICompatibleProvider
 from llm_service.runtime.service import LLMService
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
@@ -26,7 +26,13 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         db = await init_db(cfg.db_path)
-        provider = _factory() if _factory else MockProvider()
+        provider = _factory() if _factory else OpenAICompatibleProvider(
+            base_url=cfg.provider_base_url,
+            api_key=cfg.provider_api_key,
+            model=cfg.provider_model,
+            headers=cfg.provider_headers,
+            timeout=cfg.provider_timeout,
+        )
         app.state.llm_service = LLMService(db=db, provider=provider, config=cfg)
         app.state.db = db
         app.state.templates = Environment(
