@@ -136,3 +136,54 @@
 - 当前实现已经搭出了独立 LLM Runtime 的基本骨架：独立 FastAPI 进程、独立 SQLite 库、task/request/attempt/result/event 五段链路方向正确。
 - 但本轮交付尚未达到“可被 Mining 与 Serving 共同依赖的稳定 runtime 底座”标准。
 - 结论：**存在需要 Claude 修复的实质问题，当前不建议以 handoff 所述“完整 14 Task 已完成”作为闭环结论。**
+
+## 修订说明（2026-04-21 / fix 复审）
+
+- 复审提交链：`a1dfe85`、`33c1726`
+- 本轮已确认修复：
+  - `request_id` 已贯通 API / service / task / request 落库链，见 `llm_service/models.py:12-30`、`llm_service/runtime/task_manager.py:30-66`、`llm_service/runtime/service.py:95-153`。
+  - `.env` 额外字段导致默认启动失败的问题已缓解，`LLMServiceConfig` 现允许 `extra="ignore"`，见 `llm_service/config.py:25`。
+  - template CRUD API 与挂载已补齐，见 `llm_service/api/templates.py:6-80`、`llm_service/main.py:85-95`。
+  - 应用内 worker / lease recovery 已补入主程序生命周期，见 `llm_service/main.py:36-80`、`llm_service/runtime/worker.py:22-240`。
+- 但 fix 之后仍有 2 个实质问题未闭环，其中 1 个是新引入的 P1 回归。
+
+### P1. 内置 worker 与 API 共享同一个 `aiosqlite` 连接，真实启动路径会触发数据库并发错误，异步 runtime 仍不可用
+
+- `create_app()` 在同一个 lifespan 内创建单个 `db` 连接，然后同时交给 API service、`Worker` 和 `LeaseRecovery` 共享；默认还会启动 `worker_concurrency=4` 的多个后台循环。
+- `TaskManager.submit()`、`claim()`、`Worker._execute_task()` 都在这一个连接上交错执行 `SELECT/UPDATE/COMMIT`。在真实启动 `start_worker=True` 时，`POST /api/v1/tasks` 可直接打出 `sqlite3.OperationalError: cannot commit transaction - SQL statements in progress`。
+- 我已在本地用 `create_app(..., provider_factory=MockProvider, start_worker=True)` + `httpx.ASGITransport` 复现该错误；异常堆栈落点为 `llm_service/runtime/task_manager.py:65` 的 `await self._db.commit()`。
+- 现有测试规避了这个启动路径：`api_client` fixture 显式传入 `start_worker=False`，所以“74 tests 通过”并不能证明真实 worker 模式可用。
+- 这意味着上一轮 review 提出的“异步 worker 缺失”虽然形式上被补了，但当前实现仍未形成可部署的异步 runtime 闭环。
+- 代码位置：
+  - `llm_service/main.py:36-80`
+  - `llm_service/runtime/task_manager.py:53-86`
+  - `llm_service/runtime/worker.py:45-67`
+  - `llm_service/runtime/worker.py:77-160`
+- 测试位置：
+  - `llm_service/tests/conftest.py:45-63`
+
+### P2. Template 的 `expected_output_type` 没有真正进入执行合同，模板仍不能稳定主导解析语义
+
+- `LLMService._resolve_template()` 当前只把调用方传入的 `expected_output_type` 原样放进结果，模板只在 `output_schema` 为空时提供 fallback，没有把模板的 `expected_output_type` 作为默认值注入执行链。
+- `TaskSubmitRequest.expected_output_type` 默认值仍是 `json_object`，因此调用方如果只传 `template_key` 和 `input`，即使模板声明了 `expected_output_type='text'`，最终执行仍会按 JSON 解析。
+- 我已本地复现：创建 `expected_output_type='text'` 的模板后调用 `svc.execute(template_key='txttpl2', input={'name':'A'})`，返回结果是 `status='succeeded'` 但 `result.parse_status='failed'`，说明模板合同没有真正生效。
+- 当前新增测试还把这一行为写成了预期：`test_resolve_template_expands_messages()` 明确断言模板不会覆盖调用方的 `expected_output_type`。这与“统一 template 驱动执行面”的目标仍有偏差。
+- 因此，template API 虽然补齐了 CRUD 和页面入口，但模板执行语义仍是不完整交付。
+- 代码位置：
+  - `llm_service/runtime/service.py:45-89`
+  - `llm_service/runtime/service.py:115-121`
+  - `llm_service/runtime/service.py:200-206`
+  - `llm_service/models.py:12-21`
+- 测试位置：
+  - `llm_service/tests/test_template_resolution.py:35-50`
+
+## 修订后的测试缺口
+
+- 当前仍未看到覆盖“`start_worker=True` 的真实 FastAPI 启动路径 + `/tasks` 提交”的集成测试；现有 API fixture 显式关闭 worker。
+- 当前仍未看到覆盖“模板默认 `expected_output_type` 生效”的端到端测试；新增模板测试只覆盖了 message 展开和 CRUD，没有覆盖模板主导解析类型的合同。
+
+## 修订后的最终评估
+
+- 本轮 fix 已实质解决 `request_id`、配置容错、template CRUD API、worker/lease recovery 缺失这 4 类问题中的一部分。
+- 但异步 worker 的真实启动路径引入了新的数据库并发回归，template 执行合同也仍未完全落地。
+- 结论更新为：**部分处置。当前不建议把 LLM Runtime 视为已闭环底座；Claude 仍需至少修复 worker 连接模型与 template 输出类型合同后，才能进入“已处置”状态。**
