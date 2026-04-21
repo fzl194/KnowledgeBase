@@ -11,13 +11,13 @@ from pydantic import BaseModel, Field
 
 class TaskSubmitRequest(BaseModel):
     caller_domain: str = Field(..., pattern=r"^(mining|serving|evaluation|admin)$")
-    pipeline_stage: str
+    pipeline_stage: str = Field(..., pattern=r"^[a-z][a-z0-9_]{1,63}$")
     template_key: str | None = None
     input: dict[str, Any] | None = None
     messages: list[dict[str, Any]] | None = None
     params: dict[str, Any] | None = None
-    expected_output_type: str = Field(
-        default="json_object", pattern=r"^(json_object|json_array|text)$"
+    expected_output_type: str | None = Field(
+        default=None, pattern=r"^(json_object|json_array|text)$"
     )
     output_schema: dict[str, Any] | None = None
     ref_type: str | None = None

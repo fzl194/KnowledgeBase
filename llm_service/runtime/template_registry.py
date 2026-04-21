@@ -61,6 +61,7 @@ class TemplateRegistry:
         return [dict(r) for r in await cur.fetchall()]
 
     async def update(self, tpl_id: str, **fields) -> None:
+        # Safe: column names validated against static allowlist, not user input.
         sets = []
         values = []
         for k, v in fields.items():

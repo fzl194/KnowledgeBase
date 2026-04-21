@@ -107,6 +107,8 @@ class TaskManager:
             (task_id,),
         )
         row = await cur.fetchone()
+        if row is None:
+            return
         new_count = row["attempt_count"] + 1
 
         if new_count < row["max_attempts"]:

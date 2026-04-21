@@ -12,7 +12,10 @@ from llm_service.config import LLMServiceConfig
 from llm_service.db import init_db
 from llm_service.providers.base import ProviderProtocol
 from llm_service.providers.openai_compatible import OpenAICompatibleProvider
+from llm_service.runtime.event_bus import EventBus
 from llm_service.runtime.service import LLMService
+from llm_service.runtime.task_manager import TaskManager
+from llm_service.runtime.template_registry import TemplateRegistry
 from llm_service.runtime.worker import LeaseRecovery, Worker
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
@@ -35,6 +38,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # API service uses its own DB connection
         db = await init_db(cfg.db_path)
         provider = _factory() if _factory else OpenAICompatibleProvider(
             base_url=cfg.provider_base_url,
@@ -53,23 +57,60 @@ def create_app(
 
         worker = None
         recovery = None
-        if start_worker:
-            worker = Worker(
-                db=db,
-                task_manager=svc._mgr,
-                event_bus=svc._bus,
-                provider=provider,
-                templates=svc._templates,
-                concurrency=cfg.worker_concurrency,
-            )
-            await worker.start()
-            recovery = LeaseRecovery(
-                db=db,
-                task_manager=svc._mgr,
-                event_bus=svc._bus,
-                interval=30.0,
-            )
-            await recovery.start()
+        worker_db = None
+        recovery_db = None
+        try:
+            if start_worker:
+                # Worker gets its own DB connection to avoid concurrent commit conflicts
+                worker_db = await init_db(cfg.db_path)
+                worker_tmpl = TemplateRegistry(worker_db)
+                worker_bus = EventBus(worker_db)
+                worker_mgr = TaskManager(
+                    worker_db, worker_bus,
+                    max_attempts=cfg.default_max_attempts,
+                    lease_duration=cfg.lease_duration,
+                    backoff_base=cfg.retry_backoff_base,
+                    backoff_max=cfg.retry_backoff_max,
+                )
+                worker = Worker(
+                    db=worker_db,
+                    task_manager=worker_mgr,
+                    event_bus=worker_bus,
+                    provider=provider,
+                    templates=worker_tmpl,
+                    concurrency=cfg.worker_concurrency,
+                )
+                await worker.start()
+
+                # LeaseRecovery gets its own DB connection too
+                recovery_db = await init_db(cfg.db_path)
+                recovery_bus = EventBus(recovery_db)
+                recovery_mgr = TaskManager(
+                    recovery_db, recovery_bus,
+                    max_attempts=cfg.default_max_attempts,
+                    lease_duration=cfg.lease_duration,
+                    backoff_base=cfg.retry_backoff_base,
+                    backoff_max=cfg.retry_backoff_max,
+                )
+                recovery = LeaseRecovery(
+                    db=recovery_db,
+                    task_manager=recovery_mgr,
+                    event_bus=recovery_bus,
+                    interval=30.0,
+                )
+                await recovery.start()
+        except Exception:
+            # Clean up partially initialized resources on startup failure
+            if recovery:
+                await recovery.stop()
+            if worker:
+                await worker.stop()
+            if recovery_db:
+                await recovery_db.close()
+            if worker_db:
+                await worker_db.close()
+            await db.close()
+            raise
 
         yield
 
@@ -77,6 +118,10 @@ def create_app(
             await recovery.stop()
         if worker:
             await worker.stop()
+        if recovery_db:
+            await recovery_db.close()
+        if worker_db:
+            await worker_db.close()
         await db.close()
 
     app = FastAPI(title="LLM Service", version="0.1.0", lifespan=lifespan)

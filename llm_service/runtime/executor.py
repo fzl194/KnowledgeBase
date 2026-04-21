@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import aiosqlite
 
 from llm_service.providers.base import ProviderError, ProviderProtocol
+from llm_service.runtime.event_bus import EventBus
 from llm_service.runtime.parser import ParseResult, parse_output
 from llm_service.runtime.task_manager import TaskManager
 
@@ -43,6 +44,8 @@ class Executor:
         while True:
             cur = await self._db.execute("SELECT attempt_count FROM agent_llm_tasks WHERE id = ?", (task_id,))
             task_row = await cur.fetchone()
+            if task_row is None:
+                return None
             attempt_no = task_row["attempt_count"] + 1
 
             attempt_id = str(uuid.uuid4())
@@ -109,6 +112,8 @@ class Executor:
 
                 cur = await self._db.execute("SELECT max_attempts FROM agent_llm_tasks WHERE id = ?", (task_id,))
                 t = await cur.fetchone()
+                if t is None:
+                    return None
                 if attempt_no >= t["max_attempts"]:
                     await self._mgr.fail(task_id, e.error_type, e.message)
                     return None
@@ -117,6 +122,8 @@ class Executor:
                     # Read backoff time and sleep before retry
                     cur = await self._db.execute("SELECT available_at FROM agent_llm_tasks WHERE id = ?", (task_id,))
                     row = await cur.fetchone()
+                    if row is None:
+                        return None
                     available_at = datetime.fromisoformat(row["available_at"])
                     delay = (available_at - datetime.now(timezone.utc)).total_seconds()
                     if delay > 0:
@@ -134,6 +141,8 @@ class Executor:
 
                 cur = await self._db.execute("SELECT max_attempts FROM agent_llm_tasks WHERE id = ?", (task_id,))
                 t = await cur.fetchone()
+                if t is None:
+                    return None
                 if attempt_no >= t["max_attempts"]:
                     await self._mgr.fail(task_id, "unexpected_error", str(e))
                     return None
@@ -141,6 +150,8 @@ class Executor:
                     await self._mgr.fail(task_id, "unexpected_error", str(e))
                     cur = await self._db.execute("SELECT available_at FROM agent_llm_tasks WHERE id = ?", (task_id,))
                     row = await cur.fetchone()
+                    if row is None:
+                        return None
                     available_at = datetime.fromisoformat(row["available_at"])
                     delay = (available_at - datetime.now(timezone.utc)).total_seconds()
                     if delay > 0:

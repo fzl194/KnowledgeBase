@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from string import Template
@@ -14,6 +15,9 @@ from llm_service.runtime.event_bus import EventBus
 from llm_service.runtime.executor import Executor
 from llm_service.runtime.task_manager import TaskManager
 from llm_service.runtime.template_registry import TemplateRegistry
+
+
+logger = logging.getLogger(__name__)
 
 
 class LLMService:
@@ -47,7 +51,7 @@ class LLMService:
         template_key: str | None,
         input: dict | None,
         messages: list[dict] | None,
-        expected_output_type: str,
+        expected_output_type: str | None,
         output_schema: dict | None,
     ) -> dict:
         """If template_key is given, expand template into messages/schema.
@@ -79,7 +83,11 @@ class LLMService:
             msgs.append({"role": "user", "content": user_content})
             result["messages"] = msgs
 
-        # Template schema/type as fallback
+        # Template expected_output_type as fallback when caller didn't specify
+        if expected_output_type is None and tpl.get("expected_output_type"):
+            result["expected_output_type"] = tpl["expected_output_type"]
+
+        # Template schema as fallback
         if not output_schema and tpl.get("output_schema_json"):
             try:
                 result["output_schema"] = json.loads(tpl["output_schema_json"])
@@ -101,7 +109,7 @@ class LLMService:
         input: dict | None = None,
         messages: list[dict] | None = None,
         params: dict | None = None,
-        expected_output_type: str = "json_object",
+        expected_output_type: str | None = None,
         output_schema: dict | None = None,
         ref_type: str | None = None,
         ref_id: str | None = None,
@@ -117,7 +125,7 @@ class LLMService:
             template_key, input, messages, expected_output_type, output_schema,
         )
         actual_messages = resolved["messages"]
-        actual_expected_type = resolved["expected_output_type"]
+        actual_expected_type = resolved["expected_output_type"] or "json_object"
         actual_schema = resolved["output_schema"]
 
         task_id = await self._mgr.submit(
@@ -166,7 +174,7 @@ class LLMService:
         input: dict | None = None,
         messages: list[dict] | None = None,
         params: dict | None = None,
-        expected_output_type: str = "json_object",
+        expected_output_type: str | None = None,
         output_schema: dict | None = None,
         ref_type: str | None = None,
         ref_id: str | None = None,
@@ -202,7 +210,7 @@ class LLMService:
             template_key, input, messages, expected_output_type, output_schema,
         )
         actual_messages = resolved["messages"] or [{"role": "user", "content": json.dumps(input or {})}]
-        actual_expected_type = resolved["expected_output_type"]
+        actual_expected_type = resolved["expected_output_type"] or "json_object"
         actual_schema = resolved["output_schema"]
 
         # Directly set to running and execute (sync path, no queue)
@@ -227,6 +235,10 @@ class LLMService:
             # Per design: timeout does NOT fail the task.
             # Task stays 'running'; lease recovery will handle it later.
             await self._bus.emit(task_id, "failed", f"execute timed out after {effective_timeout}s (lease recovery pending)")
+            return await self._build_execute_response(task_id)
+        except Exception as e:
+            # Catch unexpected errors (DB failures, parse crashes, etc.)
+            await self._bus.emit(task_id, "failed", f"unexpected error: {e}")
             return await self._build_execute_response(task_id)
 
         return await self._build_execute_response(task_id)
@@ -256,8 +268,14 @@ class LLMService:
         }
 
         if result_row:
-            parsed = json.loads(result_row["parsed_output_json"]) if result_row["parsed_output_json"] else None
-            validation = json.loads(result_row["validation_errors_json"]) if result_row["validation_errors_json"] else []
+            try:
+                parsed = json.loads(result_row["parsed_output_json"]) if result_row["parsed_output_json"] else None
+            except json.JSONDecodeError:
+                parsed = None
+            try:
+                validation = json.loads(result_row["validation_errors_json"]) if result_row["validation_errors_json"] else []
+            except json.JSONDecodeError:
+                validation = []
             resp["result"] = {
                 "parse_status": result_row["parse_status"],
                 "parsed_output": parsed if parsed != {} else None,

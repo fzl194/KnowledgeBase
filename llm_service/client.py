@@ -6,7 +6,82 @@ import httpx
 
 
 class LLMClient:
-    """Formal client for Mining/Serving to call LLM Service."""
+    """Unified client for Mining/Serving to call LLM Service.
+
+    ## Integration Patterns
+
+    ### Mining (batch async via submit + poll)
+
+        client = LLMClient(base_url="http://localhost:8900")
+
+        # Step 1: Create template once (or pre-seed via API)
+        # POST /api/v1/templates with template_key="mining-question-gen"
+
+        # Step 2: Submit batch tasks
+        task_ids = []
+        for section in sections:
+            tid = await client.submit(
+                caller_domain="mining",
+                pipeline_stage="retrieval_units",
+                template_key="mining-question-gen",
+                input={"section_title": section.title, "content": section.text},
+                ref_type="section", ref_id=section.id,
+                build_id=build_id,
+            )
+            task_ids.append(tid)
+
+        # Step 3: Poll for results (Worker executes in background)
+        for tid in task_ids:
+            task = await client.get_task(tid)
+            if task["status"] == "succeeded":
+                result = await client.get_result(tid)
+                questions = result["parsed_output_json"]
+
+        # Alternative: entity extraction (text output)
+        tid = await client.submit(
+            caller_domain="mining",
+            pipeline_stage="enrich",
+            template_key="mining-entity-extract",
+            input={"text": section.text},
+            ref_type="section", ref_id=section.id,
+        )
+
+    ### Serving (sync online enhancement via execute)
+
+        client = LLMClient(base_url="http://localhost:8900")
+
+        # Query rewrite - needs immediate result
+        result = await client.execute(
+            caller_domain="serving",
+            pipeline_stage="normalizer",
+            template_key="serving-query-rewrite",
+            input={"query": user_query},
+            request_id=request_id,
+        )
+        rewritten = result["result"]["parsed_output"]
+
+        # Intent/entity extraction
+        result = await client.execute(
+            caller_domain="serving",
+            pipeline_stage="planner",
+            template_key="serving-intent-extract",
+            input={"query": user_query},
+            request_id=request_id,
+        )
+
+    ### Caller-provided messages (no template)
+
+        result = await client.execute(
+            caller_domain="serving",
+            pipeline_stage="rerank",
+            messages=[
+                {"role": "system", "content": "Rerank by relevance."},
+                {"role": "user", "content": f"Query: {q}\\nDocs: {docs}"},
+            ],
+            expected_output_type="json_array",
+            request_id=request_id,
+        )
+    """
 
     def __init__(
         self,
@@ -39,7 +114,7 @@ class LLMClient:
         input: dict | None = None,
         messages: list[dict] | None = None,
         params: dict | None = None,
-        expected_output_type: str = "json_object",
+        expected_output_type: str | None = None,
         output_schema: dict | None = None,
         ref_type: str | None = None,
         ref_id: str | None = None,
@@ -53,7 +128,6 @@ class LLMClient:
         payload: dict[str, Any] = {
             "caller_domain": caller_domain,
             "pipeline_stage": pipeline_stage,
-            "expected_output_type": expected_output_type,
             "max_attempts": max_attempts,
             "priority": priority,
         }
@@ -62,6 +136,7 @@ class LLMClient:
             ("input", input),
             ("messages", messages),
             ("params", params),
+            ("expected_output_type", expected_output_type),
             ("output_schema", output_schema),
             ("ref_type", ref_type),
             ("ref_id", ref_id),
@@ -80,6 +155,7 @@ class LLMClient:
         pipeline_stage: str,
         **kwargs,
     ) -> str:
+        """Submit async task. Returns task_id for later polling."""
         payload = self._build_submit_payload(caller_domain, pipeline_stage, **kwargs)
         c = self._get_client()
         resp = await c.post("/api/v1/tasks", json=payload)
@@ -92,6 +168,7 @@ class LLMClient:
         pipeline_stage: str,
         **kwargs,
     ) -> dict:
+        """Sync execute: submit and block until result."""
         payload = self._build_submit_payload(caller_domain, pipeline_stage, **kwargs)
         c = self._get_client()
         resp = await c.post("/api/v1/execute", json=payload)

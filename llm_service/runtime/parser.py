@@ -16,10 +16,13 @@ class ParseResult:
 
 
 def parse_output(
-    raw_text: str,
+    raw_text: str | None,
     expected_type: str,
     schema: dict | None = None,
 ) -> ParseResult:
+    if not raw_text:
+        return ParseResult(parse_status="failed", parse_error="empty or null response from provider")
+
     if expected_type == "text":
         return ParseResult(parse_status="succeeded", text_output=raw_text)
 
