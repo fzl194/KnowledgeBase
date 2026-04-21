@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 
@@ -10,7 +10,6 @@ from llm_service.config import LLMServiceConfig
 from llm_service.providers.base import ProviderProtocol
 from llm_service.runtime.event_bus import EventBus
 from llm_service.runtime.executor import Executor
-from llm_service.runtime.parser import ParseResult
 from llm_service.runtime.task_manager import TaskManager
 
 
@@ -128,15 +127,31 @@ class LLMService:
         if row["status"] == "succeeded":
             return await self._build_execute_response(task_id)
 
-        # Claim and run
-        await self._mgr.claim()
+        # Directly set to running and execute (sync path, no queue)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        lease_dt = datetime.now(timezone.utc) + timedelta(seconds=self._config.lease_duration)
+        await self._db.execute(
+            "UPDATE agent_llm_tasks SET status = 'running', started_at = ?, lease_expires_at = ?, updated_at = ? WHERE id = ?",
+            (now_iso, lease_dt.isoformat(), now_iso, task_id),
+        )
+        await self._db.commit()
         actual_messages = messages or [{"role": "user", "content": json.dumps(input or {})}]
         actual_params = params or {}
 
-        result = await self._executor.run(
-            task_id, actual_messages, actual_params,
-            expected_type=expected_output_type, schema=output_schema,
-        )
+        import asyncio
+
+        effective_timeout = timeout or self._config.execute_timeout
+        try:
+            result = await asyncio.wait_for(
+                self._executor.run(
+                    task_id, actual_messages, actual_params,
+                    expected_type=expected_output_type, schema=output_schema,
+                ),
+                timeout=effective_timeout,
+            )
+        except asyncio.TimeoutError:
+            await self._mgr.fail(task_id, "timeout", f"execute timed out after {effective_timeout}s")
+            return await self._build_execute_response(task_id)
 
         return await self._build_execute_response(task_id)
 

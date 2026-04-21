@@ -71,23 +71,22 @@ class TaskManager:
         lease_str = lease_dt.isoformat()
 
         cur = await self._db.execute(
-            """SELECT id FROM agent_llm_tasks
-               WHERE status = 'queued' AND available_at <= ?
-               ORDER BY priority DESC, created_at ASC LIMIT 1""",
-            (now,),
+            """UPDATE agent_llm_tasks
+               SET status = 'running', started_at = ?, lease_expires_at = ?, updated_at = ?
+               WHERE id = (
+                   SELECT id FROM agent_llm_tasks
+                   WHERE status = 'queued' AND available_at <= ?
+                   ORDER BY priority DESC, created_at ASC LIMIT 1
+               )
+               RETURNING id""",
+            (now, lease_str, now, now),
         )
         row = await cur.fetchone()
+        await self._db.commit()
         if not row:
             return None
 
         task_id = row["id"]
-        await self._db.execute(
-            """UPDATE agent_llm_tasks
-               SET status = 'running', started_at = ?, lease_expires_at = ?, updated_at = ?
-               WHERE id = ?""",
-            (now, lease_str, now, task_id),
-        )
-        await self._db.commit()
         await self._bus.emit(task_id, "claimed", "task claimed by worker")
         return task_id
 

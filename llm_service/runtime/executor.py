@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -8,7 +9,6 @@ from datetime import datetime, timezone
 import aiosqlite
 
 from llm_service.providers.base import ProviderError, ProviderProtocol
-from llm_service.runtime.event_bus import EventBus
 from llm_service.runtime.parser import ParseResult, parse_output
 from llm_service.runtime.task_manager import TaskManager
 
@@ -114,4 +114,34 @@ class Executor:
                     return None
                 else:
                     await self._mgr.fail(task_id, e.error_type, e.message)
-                    # Retry loop continues — task is back to queued
+                    # Read backoff time and sleep before retry
+                    cur = await self._db.execute("SELECT available_at FROM agent_llm_tasks WHERE id = ?", (task_id,))
+                    row = await cur.fetchone()
+                    available_at = datetime.fromisoformat(row["available_at"])
+                    delay = (available_at - datetime.now(timezone.utc)).total_seconds()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+            except Exception as e:
+                latency = int((time.monotonic() - start) * 1000)
+                finished = datetime.now(timezone.utc).isoformat()
+                await self._db.execute(
+                    """UPDATE agent_llm_attempts
+                       SET status = 'failed', error_type = ?, error_message = ?, latency_ms = ?, finished_at = ?
+                       WHERE id = ?""",
+                    ("unexpected_error", str(e), latency, finished, attempt_id),
+                )
+                await self._db.commit()
+
+                cur = await self._db.execute("SELECT max_attempts FROM agent_llm_tasks WHERE id = ?", (task_id,))
+                t = await cur.fetchone()
+                if attempt_no >= t["max_attempts"]:
+                    await self._mgr.fail(task_id, "unexpected_error", str(e))
+                    return None
+                else:
+                    await self._mgr.fail(task_id, "unexpected_error", str(e))
+                    cur = await self._db.execute("SELECT available_at FROM agent_llm_tasks WHERE id = ?", (task_id,))
+                    row = await cur.fetchone()
+                    available_at = datetime.fromisoformat(row["available_at"])
+                    delay = (available_at - datetime.now(timezone.utc)).total_seconds()
+                    if delay > 0:
+                        await asyncio.sleep(delay)

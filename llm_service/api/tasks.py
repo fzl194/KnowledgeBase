@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from llm_service.models import TaskSubmitRequest
 
@@ -63,7 +63,7 @@ async def get_task(task_id: str, request: Request):
     svc = request.app.state.llm_service
     task = await svc.get_task(task_id)
     if not task:
-        return {"error": "not found"}, 404
+        raise HTTPException(status_code=404, detail="task not found")
     return dict(task)
 
 

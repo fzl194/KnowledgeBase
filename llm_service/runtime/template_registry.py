@@ -6,6 +6,13 @@ from datetime import datetime, timezone
 import aiosqlite
 
 
+_ALLOWED_UPDATE_COLUMNS = frozenset({
+    "template_key", "template_version", "purpose", "system_prompt",
+    "user_prompt_template", "expected_output_type", "output_schema_json",
+    "output_schema_key", "status", "metadata_json",
+})
+
+
 class TemplateRegistry:
     def __init__(self, db: aiosqlite.Connection):
         self._db = db
@@ -57,6 +64,8 @@ class TemplateRegistry:
         sets = []
         values = []
         for k, v in fields.items():
+            if k not in _ALLOWED_UPDATE_COLUMNS:
+                raise ValueError(f"invalid column: {k}")
             sets.append(f"{k} = ?")
             values.append(v)
         if not sets:

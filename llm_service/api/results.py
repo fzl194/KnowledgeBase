@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 router = APIRouter(prefix="/api/v1")
 
@@ -10,7 +10,7 @@ async def get_result(task_id: str, request: Request):
     svc = request.app.state.llm_service
     result = await svc.get_result(task_id)
     if not result:
-        return {"error": "not found"}
+        raise HTTPException(status_code=404, detail="result not found")
     return dict(result)
 
 

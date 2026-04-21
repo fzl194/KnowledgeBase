@@ -16,12 +16,19 @@ class LLMClient:
     ):
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
+        self._external_client = http_client is not None
         self._client = http_client
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is not None:
             return self._client
-        return httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout)
+        self._client = httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout)
+        return self._client
+
+    async def close(self) -> None:
+        if self._client and not self._external_client:
+            await self._client.aclose()
+            self._client = None
 
     def _build_submit_payload(
         self,
