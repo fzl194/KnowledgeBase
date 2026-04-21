@@ -32,3 +32,32 @@ def config(tmp_path):
         provider_api_key="test-key",
         provider_model="test-model",
     )
+
+
+def _mock_provider():
+    from llm_service.providers.mock import MockProvider
+
+    return MockProvider(
+        responses=[{"choices": [{"message": {"content": '{"answer": 42}'}}]}]
+    )
+
+
+@pytest.fixture
+async def api_client(tmp_path):
+    """HTTP client pointing at a test ASGI app with MockProvider."""
+    from httpx import ASGITransport, AsyncClient
+
+    from llm_service.config import LLMServiceConfig
+    from llm_service.main import create_app
+
+    cfg = LLMServiceConfig(
+        db_path=str(tmp_path / "test_api.sqlite"),
+        provider_base_url="http://localhost:11434/v1",
+        provider_api_key="test-key",
+        provider_model="test-model",
+    )
+    app = create_app(cfg, provider_factory=_mock_provider)
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c
