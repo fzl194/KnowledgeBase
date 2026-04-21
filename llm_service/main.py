@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Callable
 
 from fastapi import FastAPI
+from jinja2 import Environment, FileSystemLoader
 
 from llm_service.config import LLMServiceConfig
 from llm_service.db import init_db
 from llm_service.providers.base import ProviderProtocol
 from llm_service.providers.mock import MockProvider
 from llm_service.runtime.service import LLMService
+
+_TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 
 
 def create_app(
@@ -25,6 +29,10 @@ def create_app(
         provider = _factory() if _factory else MockProvider()
         app.state.llm_service = LLMService(db=db, provider=provider, config=cfg)
         app.state.db = db
+        app.state.templates = Environment(
+            loader=FileSystemLoader(str(_TEMPLATES_DIR)),
+            autoescape=True,
+        )
         yield
         await db.close()
 
@@ -34,9 +42,11 @@ def create_app(
     from llm_service.api.health import router as health_router
     from llm_service.api.results import router as results_router
     from llm_service.api.tasks import router as tasks_router
+    from llm_service.dashboard.views import router as dashboard_router
 
     app.include_router(health_router)
     app.include_router(tasks_router)
     app.include_router(results_router)
+    app.include_router(dashboard_router)
 
     return app
