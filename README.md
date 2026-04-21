@@ -52,26 +52,42 @@ databases/
 
 含义分别是：
 
-- `asset_core`：知识资产库，Mining 写，Serving 读，只保存当前 active 可服务资产
+- `asset_core`：知识资产库，Mining 写，Serving 读，保存共享内容快照、build、release 以及其下游检索资产
 - `mining_runtime`：Mining 自身运行态库，保存 run、断点续跑、阶段状态、失败定位
 - `agent_llm_runtime`：独立 LLM 服务运行态库，保存 prompt、task、request、attempt、result、event
 
 ### 当前关键原则
 
-1. `asset_core` 是事实资产库，不保存复杂运行态噪音。
+1. `asset_core` 是稳定知识资产库 + build/release 控制面，不保存复杂运行态噪音。
 2. `mining_runtime` 是过程状态库，不作为 Serving 读取入口。
 3. `agent_llm_runtime` 是独立服务库，不与资产库混表。
-4. Serving 只读 active 资产。
-5. Serving 1.1 主路径不再围绕 canonical，而应围绕：
+4. Serving 只读 active `release` 对应的 `build`。
+5. `snapshot` 是共享内容快照，不是文档专属快照。
+6. `build` 定义“这次知识视图里每个 document 采用哪个 snapshot”。
+7. `publish` 的正式语义是 `release -> build`，不是换文件，也不是日志。
+8. Serving 1.1 主路径不再围绕 canonical，而应围绕：
 
 ```text
-raw_documents
+shared snapshots
   -> raw_segments
   -> raw_segment_relations
   -> retrieval_units
 ```
 
-6. LLM 是增强器，不是事实源。
+9. LLM 是增强器，不是事实源。
+
+### 当前 `asset_core` 主链
+
+```text
+source_batch
+  -> document
+  -> shared snapshot
+  -> document_snapshot_link
+  -> raw_segments / relations / retrieval_units
+  -> build
+  -> release
+  -> serving
+```
 
 ### 关于 Mining 涉及两个 DB 是否合并
 
@@ -140,8 +156,10 @@ raw_documents
 1. `raw segment` 是事实单元
 2. `retrieval unit` 是检索单元
 3. `raw segment relation` 是上下文关系
-4. `ContextPack / EvidencePack` 是 Serving 输出
-5. `LLM Runtime Task` 是 LLM 调用抽象
+4. `shared snapshot` 是内容复用边界
+5. `build / release` 是知识视图与发布边界
+6. `ContextPack / EvidencePack` 是 Serving 输出
+7. `LLM Runtime Task` 是 LLM 调用抽象
 
 ---
 
@@ -189,11 +207,18 @@ raw_documents
 
 ##### A. 原始事实层
 
-把每个文件登记成 `asset_raw_documents`，把可解析内容落到 `asset_raw_segments`。
+把每个输入文件先归到：
+
+- `asset_documents`
+- `asset_document_snapshots`
+- `asset_document_snapshot_links`
+
+再把可解析内容落到 `asset_raw_segments`。
 
 关键要求：
 
-- 文档可回溯
+- 文档身份可回溯
+- 内容快照可复用
 - 片段可回溯
 - `section_path` 稳定
 - `structure_json` 尽量保真
@@ -244,7 +269,7 @@ retrieval_unit 是面向检索的封装视图
 
 1. 不要把 Serving 当前某个查询逻辑写死到 schema 中
 2. 不要要求未来语料必须带 manifest 或固定元数据文件
-3. 不要把 canonical 当 1.1 主路径继续强化
+3. 不要再保留或强化 canonical 主路径
 4. 不要把 LLM 结果当原始事实
 5. 不要为了某个命令场景造一堆命令专用外层列
 
@@ -253,6 +278,7 @@ retrieval_unit 是面向检索的封装视图
 对 Serving，他提供的是：
 
 - active `asset_core`
+- active `release -> build`
 - 稳定的 `retrieval_units`
 - 可下钻的 `raw_segments`
 - 可扩展的 `raw_segment_relations`
@@ -334,7 +360,7 @@ asset_retrieval_units
 retrieval_units
   -> source_refs_json
   -> raw_segments
-  -> raw_documents
+  -> document_snapshot_links / documents
   -> raw_segment_relations
 ```
 
@@ -539,11 +565,14 @@ asset_core 数据契约
 
 主要就是：
 
-- `raw_documents`
+- `documents`
+- `document_snapshots`
+- `document_snapshot_links`
 - `raw_segments`
 - `raw_segment_relations`
 - `retrieval_units`
-- `publish_versions`
+- `builds`
+- `publish_releases`
 
 #### Mining / Serving -> LLM
 
