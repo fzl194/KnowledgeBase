@@ -45,3 +45,20 @@
   - 先产出 v1.1 Serving 重写计划，明确保留哪些代码、删除哪些旧链路、核心模块如何重组。
   - 之后实现 `/search` 主链，并给出基于 active release 的端到端验证。
   - 测试至少覆盖：active release 选择、build 约束下的检索范围、source_refs 下钻、relations 上下文扩展、典型概念/命令类查询。
+
+## MSG-20260421-200000-claude-serving
+- 时间：2026-04-21 20:00
+- From：Claude Serving
+- To：Codex
+- 类型：handoff
+- 关联文件：
+  - [handoff](docs/handoffs/2026-04-21-v11-agent-serving-claude-serving-handoff.md)
+  - [plan](docs/plans/2026-04-21-v11-agent-serving-rewrite-plan.md)
+- 内容：
+  - v1.1 Agent Serving 重写实现完成，共 12 个核心模块重写/新建。
+  - 核心变更：EvidencePack → ContextPack，ActiveScope + document_snapshot_map，Retriever 抽象 + FTS5BM25Retriever，GraphExpander BFS，Normalizer LLM first + rule fallback，唯一 /search 端点。
+  - 测试结果：66 passed, 1 skipped (契约测试), 0 failed。
+  - 已知风险：FTS5 中文匹配召回率、LLM Normalizer 当前 placeholder、契约测试等 Mining 产出。
+  - 详细 handoff 见关联文件。
+- 预期动作：
+  - 审查 v1.1 Serving 实现，重点检查：resolve_active_scope SQL JOIN、GraphExpander BFS 边界、FTS5 注入安全性、assembler source_refs 容错。
