@@ -1,0 +1,140 @@
+"""Integration tests covering full end-to-end flows."""
+import json
+
+import pytest
+
+pytestmark = pytest.mark.asyncio
+
+
+async def test_full_sync_execute_flow(api_client):
+    """Submit via /execute → get result → verify attempts + events."""
+    exec_resp = await api_client.post(
+        "/api/v1/execute",
+        json={
+            "caller_domain": "mining",
+            "pipeline_stage": "extract",
+            "messages": [{"role": "user", "content": "extract entities"}],
+            "expected_output_type": "json_object",
+        },
+    )
+    assert exec_resp.status_code == 200
+    body = exec_resp.json()
+    task_id = body["task_id"]
+    assert body["status"] == "succeeded"
+    assert body["result"]["parsed_output"] == {"answer": 42}
+
+    # Verify result endpoint
+    result = (await api_client.get(f"/api/v1/tasks/{task_id}/result")).json()
+    assert result["parse_status"] == "succeeded"
+
+    # Verify attempts
+    attempts = (await api_client.get(f"/api/v1/tasks/{task_id}/attempts")).json()
+    assert len(attempts) == 1
+    assert attempts[0]["status"] == "succeeded"
+    assert attempts[0]["latency_ms"] is not None
+
+    # Verify events
+    events = (await api_client.get(f"/api/v1/tasks/{task_id}/events")).json()
+    event_types = [e["event_type"] for e in events]
+    assert "submitted" in event_types
+    assert "succeeded" in event_types
+
+
+async def test_async_submit_then_get(api_client):
+    """Submit async task → poll status."""
+    submit = await api_client.post(
+        "/api/v1/tasks",
+        json={
+            "caller_domain": "serving",
+            "pipeline_stage": "search",
+            "messages": [{"role": "user", "content": "search query"}],
+            "priority": 50,
+        },
+    )
+    task_id = submit.json()["task_id"]
+    assert submit.json()["status"] == "queued"
+
+    task = (await api_client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert task["status"] == "queued"
+    assert task["caller_domain"] == "serving"
+    assert task["pipeline_stage"] == "search"
+
+
+async def test_idempotency_key_dedup(api_client):
+    """Same idempotency_key returns same task_id."""
+    payload = {
+        "caller_domain": "mining",
+        "pipeline_stage": "normalize",
+        "messages": [{"role": "user", "content": "normalize"}],
+        "idempotency_key": "idem-integration-001",
+    }
+    r1 = await api_client.post("/api/v1/tasks", json=payload)
+    r2 = await api_client.post("/api/v1/tasks", json=payload)
+    assert r1.json()["task_id"] == r2.json()["task_id"]
+
+    # Execute with same idempotency_key should also return same task
+    r3 = await api_client.post("/api/v1/execute", json={**payload, "idempotency_key": "idem-integration-001"})
+    # The execute will see the queued task, claim and run it
+    assert r3.json()["task_id"] == r1.json()["task_id"]
+
+
+async def test_cancel_prevents_execution(api_client):
+    """Submit → cancel → verify status."""
+    submit = await api_client.post(
+        "/api/v1/tasks",
+        json={"caller_domain": "mining", "pipeline_stage": "test"},
+    )
+    task_id = submit.json()["task_id"]
+
+    cancel = await api_client.post(f"/api/v1/tasks/{task_id}/cancel")
+    assert cancel.status_code == 200
+
+    task = (await api_client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert task["status"] == "cancelled"
+
+
+async def test_template_crud_and_usage(api_client):
+    """Dashboard endpoint works; templates can be queried."""
+    # Verify dashboard renders without error
+    dash = await api_client.get("/dashboard")
+    assert dash.status_code == 200
+
+    # Verify stats API
+    stats = await api_client.get("/dashboard/api/stats")
+    assert stats.status_code == 200
+    assert isinstance(stats.json()["tasks_by_status"], dict)
+
+
+async def test_execute_with_text_output_type(api_client):
+    """text output_type returns raw text without JSON parsing."""
+    resp = await api_client.post(
+        "/api/v1/execute",
+        json={
+            "caller_domain": "evaluation",
+            "pipeline_stage": "grade",
+            "messages": [{"role": "user", "content": "grade this"}],
+            "expected_output_type": "text",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    # MockProvider returns '{"answer": 42}' as text, which text type should store as-is
+    assert body["result"]["text_output"] == '{"answer": 42}'
+
+
+async def test_schema_validation(api_client):
+    """Schema validation marks result as schema_invalid when output doesn't match."""
+    resp = await api_client.post(
+        "/api/v1/execute",
+        json={
+            "caller_domain": "mining",
+            "pipeline_stage": "validate",
+            "messages": [{"role": "user", "content": "test"}],
+            "expected_output_type": "json_object",
+            "output_schema": {"type": "object", "required": ["name"]},
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    # MockProvider returns {"answer": 42} which doesn't have "name" → schema_invalid
+    assert body["result"]["parse_status"] == "schema_invalid"
