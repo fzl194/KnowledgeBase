@@ -1,6 +1,6 @@
 # Knowledge Mining
 
-`knowledge_mining` 是 CoreMasterKB 的离线知识挖掘模块。它不提供在线 API，也不直接回答问题；它的职责是把一个普通文件夹中的原始资料扫描、解析、切片、归并，并发布成 `knowledge_assets` 约定的 SQLite 知识资产库，供 `agent_serving` 只读检索。
+`knowledge_mining` 是 CoreMasterKB 的离线知识挖掘模块。它不提供在线 API，也不直接回答问题；它的职责是把一个普通文件夹中的原始资料扫描、解析、切片、归并，并发布成 `databases/asset_core` 约定的 SQLite 知识资产库，供 `agent_serving` 只读检索。
 
 当前 M1 版本的核心边界是：
 
@@ -9,7 +9,7 @@
 - M1 只真正解析 Markdown 和 TXT。
 - HTML、PDF、DOC、DOCX 会登记到 `asset_raw_documents`，但不会生成切片。
 - Mining 不 import Serving，Serving 也不 import Mining；两边只通过数据库表结构对接。
-- 数据库 schema 来自 `knowledge_assets/schemas/001_asset_core.sqlite.sql`。
+- 数据库 schema 来自 `databases/asset_core/schemas/001_asset_core.sqlite.sql`。
 
 ## 整体架构
 
@@ -356,11 +356,11 @@ SQLite 适配层。
 
 - 连接 SQLite。
 - 开启 WAL 和 foreign keys。
-- 读取共享 DDL：`knowledge_assets/schemas/001_asset_core.sqlite.sql`。
+- 读取共享 DDL：`databases/asset_core/schemas/001_asset_core.sqlite.sql`。
 - 封装六张核心表的 insert。
 - 封装 active version 切换。
 
-它不维护私有 DDL。schema 变更必须先改 `knowledge_assets` 的共享契约。
+它不维护私有 DDL。schema 变更必须先改 `databases/asset_core` 的共享契约。
 
 ### `mining/text_utils.py`
 
@@ -514,6 +514,5 @@ Mining 应该：
 | 增强实体抽取或语义角色 | `mining/extractors.py` |
 | 调整去重归并策略 | `mining/canonicalization.py` |
 | 调整发布版本生命周期 | `mining/publishing/__init__.py` |
-| 调整落库字段 | `mining/db.py` 和 `knowledge_assets/schemas/001_asset_core.sqlite.sql` |
+| 调整落库字段 | `mining/db.py` 和 `databases/asset_core/schemas/001_asset_core.sqlite.sql` |
 | 调整 CLI | `mining/jobs/run.py` |
-

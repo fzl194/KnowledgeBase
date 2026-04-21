@@ -7,8 +7,8 @@
   - `.dev/2026-04-20-agent-knowledge-backend-redesign.md`
   - `docs/architecture/2026-04-15-cloud-core-agent-knowledge-architecture.md`
   - `docs/architecture/2026-04-15-mining-serving-parallel-design.md`
-  - `knowledge_assets/schemas/001_asset_core.sql`
-  - `knowledge_assets/schemas/001_asset_core.sqlite.sql`
+  - `databases/asset_core/schemas/001_asset_core.sql`
+  - `databases/asset_core/schemas/001_asset_core.sqlite.sql`
 
 ## 1. 背景
 
@@ -16,7 +16,7 @@
 
 - Mining 负责离线生产知识资产。
 - Serving 负责在线读取 active 资产并返回 Agent 可消费的 evidence/context。
-- 两者通过 `knowledge_assets/schemas/` 中的数据库资产契约对接，不互相 import。
+- 两者通过 `databases/asset_core/schemas/` 中的数据库资产契约对接，不互相 import。
 
 dev 最新笔记进一步提出：后续主路径应从 canonical 主导的归并检索，转向 raw segment + retrieval unit + relation 的通用 RAG/Graph RAG 方向，并预留 LLM planner、rerank、context compression 等能力。
 
@@ -146,7 +146,7 @@ agent_runtime/
 | `agent_serving` -> `agent_runtime` | 允许，提交 LLM 任务、同步/异步获取结果 |
 | `agent_runtime` -> `knowledge_mining` | 禁止 |
 | `agent_runtime` -> `agent_serving` | 禁止 |
-| `agent_runtime` -> `knowledge_assets.schemas` | 可读共享 runtime DDL 或由 `scripts/init_db.py` 统一初始化 |
+| `agent_runtime` -> `databases/**/schemas` | 可读共享 runtime DDL 或由 `scripts/init_db.py` 统一初始化 |
 
 ## 6. 调用场景
 
@@ -411,8 +411,8 @@ LLM_CONTEXT_COMPRESSION_ENABLED=false
 现有 `asset_*` 六张表不适合承载 LLM 调用日志。应新增 runtime 自有 DDL：
 
 ```text
-knowledge_assets/schemas/002_agent_llm_runtime.sql
-knowledge_assets/schemas/002_agent_llm_runtime.sqlite.sql
+databases/agent_llm_runtime/schemas/001_agent_llm_runtime.sql
+databases/agent_llm_runtime/schemas/001_agent_llm_runtime.sqlite.sql
 ```
 
 或者如果希望 runtime 完全独立，也可以放：

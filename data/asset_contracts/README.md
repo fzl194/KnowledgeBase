@@ -4,7 +4,7 @@
 
 当前文件：
 
-- `asset_core_v1_1.sqlite`：基于 `knowledge_assets/schemas/001_asset_core.sqlite.sql` 生成的空库基线。
+- `asset_core_v1_1.sqlite`：基于 `databases/asset_core/schemas/001_asset_core.sqlite.sql` 生成的空库基线。
 
 用途：
 

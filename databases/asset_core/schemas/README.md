@@ -1,12 +1,12 @@
 # Asset Core Schema
 
 > 当前版本：v1.1  
-> SQLite 契约：`knowledge_assets/schemas/001_asset_core.sqlite.sql`  
-> Generic SQL 基线：`knowledge_assets/schemas/001_asset_core.sql`
+> SQLite 契约：`databases/asset_core/schemas/001_asset_core.sqlite.sql`  
+> Generic SQL 基线：`databases/asset_core/schemas/001_asset_core.sql`
 
 ## 目标
 
-`knowledge_assets/schemas/` 是 CoreMasterKB 当前共享的知识资产数据库契约来源。
+`databases/asset_core/schemas/` 是 CoreMasterKB 当前共享的知识资产数据库契约来源。
 
 这版 schema 对应我们最新定下的 1.1 原则：
 
@@ -288,7 +288,7 @@ other
 
 ## 本目录清理结果
 
-`knowledge_assets` 当前只保留仍然有价值的内容：
+`databases/asset_core` 当前只保留仍然有价值的内容：
 
 - `schemas/`
 - `dictionaries/`

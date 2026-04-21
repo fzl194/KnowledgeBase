@@ -40,7 +40,7 @@ Raw Documents / 原始资料
 2. Agent 服务任务：在线消费知识资产。
 ```
 
-两边不互相调用、不共享业务函数、不互相 import。中间唯一桥梁是 `knowledge_assets` 定义的数据库资产契约。
+两边不互相调用、不共享业务函数、不互相 import。中间唯一桥梁是 `databases/asset_core` 定义的数据库资产契约。
 
 ## 2. 可行性判断
 
@@ -51,7 +51,7 @@ Raw Documents / 原始资料
 ```text
 knowledge_mining 不 import agent_serving。
 agent_serving 不 import knowledge_mining。
-两边只通过 knowledge_assets/schemas 下的数据库表结构对接。
+两边只通过 `databases/asset_core/schemas/` 下的数据库表结构对接。
 schema 变更必须先更新契约文档，再改代码。
 ```
 
@@ -310,7 +310,7 @@ Serving:
 | 约束 | 要求 |
 | --- | --- |
 | 代码隔离 | Mining 不改 `agent_serving/**`；Serving 不改 `knowledge_mining/**` |
-| 数据桥梁 | 两边只通过 `knowledge_assets/schemas/**` 和数据库表结构对接 |
+| 数据桥梁 | 两边只通过 `databases/asset_core/schemas/**` 和数据库表结构对接 |
 | 发布边界 | Mining 写 staging/active 资产；Serving 只读 active 资产 |
 | 测试隔离 | 两边各自有自己的 tests，不能依赖对方实现 |
 | 共享变更 | schema 变更必须先改契约文档，并在任务消息中说明 |
@@ -331,8 +331,8 @@ Serving:
 
 ```text
 knowledge_mining/**
-knowledge_assets/dictionaries/**
-knowledge_assets/samples/**
+databases/asset_core/dictionaries/**
+databases/asset_core/samples/**
 docs/messages/TASK-20260415-m1-knowledge-mining.md
 docs/plans/ 与 docs/handoffs/ 中本任务相关文件
 ```
@@ -340,7 +340,7 @@ docs/plans/ 与 docs/handoffs/ 中本任务相关文件
 谨慎修改范围：
 
 ```text
-knowledge_assets/schemas/**
+databases/asset_core/schemas/**
 docs/contracts/**
 ```
 
@@ -404,7 +404,7 @@ docs/plans/ 与 docs/handoffs/ 中本任务相关文件
 谨慎修改范围：
 
 ```text
-knowledge_assets/schemas/**
+databases/asset_core/schemas/**
 docs/contracts/**
 ```
 
@@ -414,7 +414,7 @@ docs/contracts/**
 
 ```text
 knowledge_mining/**
-knowledge_assets/dictionaries/**
+databases/asset_core/dictionaries/**
 ```
 
 Serving 可以使用测试 fixture 或手写 seed 数据模拟数据库中已经存在 L0/L1/L2，不等待 Mining 实现完成。
@@ -461,7 +461,7 @@ embedding 批处理
 | serving.retrieval_logs | 检索日志 | Serving | Serving |
 | serving.feedback_logs | Agent/用户反馈 | Serving | 后续 Mining 可选分析 |
 
-如使用 SQLite dev mode，可以用同名逻辑表或前缀模拟 schema，例如 `asset_raw_segments`。但字段语义必须保持一致，SQLite 兼容 DDL 也应放在 `knowledge_assets/schemas/`，不得由 Mining 和 Serving 各自维护私有 asset schema。
+如使用 SQLite dev mode，可以用同名逻辑表或前缀模拟 schema，例如 `asset_raw_segments`。但字段语义必须保持一致，SQLite 兼容 DDL 也应放在 `databases/asset_core/schemas/`，不得由 Mining 和 Serving 各自维护私有 asset schema。
 
 ## 10. 运行态检索逻辑
 

@@ -8,7 +8,7 @@
 
 - Serving 只读 `asset_*` 知识资产表。
 - Serving 不 import `knowledge_mining`。
-- Mining 和 Serving 只通过 `knowledge_assets/schemas/001_asset_core.sqlite.sql` 对接。
+- Mining 和 Serving 只通过 `databases/asset_core/schemas/001_asset_core.sqlite.sql` 对接。
 - 查询主入口是 `/api/v1/search`。
 - `/api/v1/command-usage` 只是兼容快捷入口，内部也走通用 QueryPlan 管线。
 - M1 使用 `search_text LIKE` + Python 侧 JSON 容错过滤和打分，不做向量检索、LLM planner、ontology expansion。
@@ -354,14 +354,14 @@ Serving 会用只读 URI 打开：
 file:<db_path>?mode=ro
 ```
 
-这意味着 Serving 不应修改 asset DB。如果 DB 不存在、没有 active version 或 schema 不匹配，请回到 Mining 或 `knowledge_assets` 侧处理。
+这意味着 Serving 不应修改 asset DB。如果 DB 不存在、没有 active version 或 schema 不匹配，请回到 Mining 或 `databases/asset_core` 侧处理。
 
 ### Dev / Test 空库模式
 
 未设置 `COREMASTERKB_ASSET_DB_PATH` 时，Serving 创建 `:memory:` SQLite，并执行共享 DDL：
 
 ```text
-knowledge_assets/schemas/001_asset_core.sqlite.sql
+databases/asset_core/schemas/001_asset_core.sqlite.sql
 ```
 
 注意：这只建表，不插数据。
@@ -481,4 +481,3 @@ Serving 不做：
 | 修改 evidence/variant/conflict/gap 组装 | `serving/application/assembler.py` |
 | 修改 DB 初始化 | `serving/main.py`, `serving/repositories/schema_adapter.py` |
 | 增加真实 Mining DB 契约测试 | `tests/test_mining_contract.py` |
-

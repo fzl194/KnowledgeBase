@@ -1,6 +1,6 @@
 """Schema adapter: load shared SQLite DDL for dev/test.
 
-Reads the shared `knowledge_assets/schemas/001_asset_core.sqlite.sql`
+Reads the shared `databases/asset_core/schemas/001_asset_core.sqlite.sql`
 directly — no dynamic PG→SQLite conversion. This is the ONLY place
 where asset table structure is loaded for dev/test mode.
 
@@ -14,7 +14,7 @@ import aiosqlite
 
 _SCHEMA_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "..",
-    "knowledge_assets", "schemas", "001_asset_core.sqlite.sql",
+    "databases", "asset_core", "schemas", "001_asset_core.sqlite.sql",
 )
 
 

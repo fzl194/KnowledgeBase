@@ -12,7 +12,8 @@ class MiningDB:
 
     _SHARED_SCHEMA_PATH = (
         Path(__file__).resolve().parents[2]
-        / "knowledge_assets"
+        / "databases"
+        / "asset_core"
         / "schemas"
         / "001_asset_core.sqlite.sql"
     )

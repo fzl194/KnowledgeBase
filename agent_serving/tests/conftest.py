@@ -1,7 +1,7 @@
 """Shared test fixtures: SQLite from shared DDL + v0.5 seed data.
 
 Schema tables are created directly from
-`knowledge_assets/schemas/001_asset_core.sqlite.sql`. This file only
+`databases/asset_core/schemas/001_asset_core.sqlite.sql`. This file only
 inserts test data — no private DDL.
 
 Seed data covers:
