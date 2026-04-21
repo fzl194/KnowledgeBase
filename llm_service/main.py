@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Callable
@@ -12,13 +13,17 @@ from llm_service.db import init_db
 from llm_service.providers.base import ProviderProtocol
 from llm_service.providers.openai_compatible import OpenAICompatibleProvider
 from llm_service.runtime.service import LLMService
+from llm_service.runtime.worker import Worker
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+logger = logging.getLogger(__name__)
 
 
 def create_app(
     config: LLMServiceConfig | None = None,
     provider_factory: Callable[[], ProviderProtocol] | None = None,
+    *,
+    start_worker: bool = True,
 ) -> FastAPI:
     cfg = config or LLMServiceConfig()
     _factory = provider_factory
@@ -33,13 +38,30 @@ def create_app(
             headers=cfg.provider_headers,
             timeout=cfg.provider_timeout,
         )
-        app.state.llm_service = LLMService(db=db, provider=provider, config=cfg)
+        svc = LLMService(db=db, provider=provider, config=cfg)
+        app.state.llm_service = svc
         app.state.db = db
         app.state.templates = Environment(
             loader=FileSystemLoader(str(_TEMPLATES_DIR)),
             autoescape=True,
         )
+
+        worker = None
+        if start_worker:
+            worker = Worker(
+                db=db,
+                task_manager=svc._mgr,
+                event_bus=svc._bus,
+                provider=provider,
+                templates=svc._templates,
+                concurrency=cfg.worker_concurrency,
+            )
+            await worker.start()
+
         yield
+
+        if worker:
+            await worker.stop()
         await db.close()
 
     app = FastAPI(title="LLM Service", version="0.1.0", lifespan=lifespan)

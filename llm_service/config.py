@@ -22,4 +22,4 @@ class LLMServiceConfig(BaseSettings):
     execute_timeout: int = 60
     lease_duration: int = 300
 
-    model_config = {"env_prefix": "LLM_SERVICE_"}
+    model_config = {"env_prefix": "LLM_SERVICE_", "env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}

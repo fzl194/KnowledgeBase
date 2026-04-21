@@ -56,7 +56,7 @@ async def api_client(tmp_path):
         provider_api_key="test-key",
         provider_model="test-model",
     )
-    app = create_app(cfg, provider_factory=_mock_provider)
+    app = create_app(cfg, provider_factory=_mock_provider, start_worker=False)
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as c:

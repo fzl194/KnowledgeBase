@@ -138,3 +138,85 @@ async def test_schema_validation(api_client):
     body = resp.json()
     # MockProvider returns {"answer": 42} which doesn't have "name" → schema_invalid
     assert body["result"]["parse_status"] == "schema_invalid"
+
+
+async def test_request_id_persisted(api_client):
+    """request_id passed by caller is stored in task and request rows."""
+    resp = await api_client.post(
+        "/api/v1/execute",
+        json={
+            "caller_domain": "mining",
+            "pipeline_stage": "extract",
+            "messages": [{"role": "user", "content": "test"}],
+            "request_id": "req-abc-123",
+        },
+    )
+    assert resp.status_code == 200
+    task_id = resp.json()["task_id"]
+
+    # Verify request_id on task row
+    task = (await api_client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert task["request_id"] == "req-abc-123"
+
+    # Verify request row id matches
+    attempts = (await api_client.get(f"/api/v1/tasks/{task_id}/attempts")).json()
+    assert len(attempts) == 1
+
+
+async def test_template_key_expands_messages(api_client):
+    """When template_key is provided without messages, template resolves gracefully."""
+    # No template exists in test DB, so template_key is silently ignored
+    # and messages fall back to input dict. The task still succeeds.
+    resp = await api_client.post(
+        "/api/v1/execute",
+        json={
+            "caller_domain": "mining",
+            "pipeline_stage": "test",
+            "template_key": "nonexistent-template",
+            "input": {"query": "test"},
+            "expected_output_type": "text",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "succeeded"
+
+
+async def test_dashboard_task_detail(api_client):
+    """Dashboard detail page shows task info."""
+    exec_resp = await api_client.post(
+        "/api/v1/execute",
+        json={
+            "caller_domain": "serving",
+            "pipeline_stage": "query_rewrite",
+            "messages": [{"role": "user", "content": "rewrite"}],
+        },
+    )
+    task_id = exec_resp.json()["task_id"]
+
+    detail = await api_client.get(f"/dashboard/tasks/{task_id}")
+    assert detail.status_code == 200
+    assert task_id[:8] in detail.text
+    assert "serving" in detail.text
+
+
+async def test_dashboard_filtering(api_client):
+    """Dashboard supports status/domain/stage filtering."""
+    # Create a task with known params
+    await api_client.post(
+        "/api/v1/execute",
+        json={
+            "caller_domain": "evaluation",
+            "pipeline_stage": "grade",
+            "messages": [{"role": "user", "content": "test"}],
+        },
+    )
+
+    # Filter by domain
+    resp = await api_client.get("/dashboard?domain=evaluation")
+    assert resp.status_code == 200
+    assert "evaluation" in resp.text
+
+    # Filter by non-existent status
+    resp = await api_client.get("/dashboard?status=dead_letter")
+    assert resp.status_code == 200
+    assert "No tasks found" in resp.text

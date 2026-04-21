@@ -8,9 +8,12 @@
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
-        .container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
+        .container { max-width: 1400px; margin: 0 auto; padding: 2rem; }
         h1 { font-size: 1.5rem; font-weight: 700; margin-bottom: 1.5rem; color: #f8fafc; }
-        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
+        h2 { font-size: 1.1rem; margin-bottom: 0.75rem; color: #f8fafc; }
+        a { color: #60a5fa; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
         .stat-card { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 1.25rem; }
         .stat-card .label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin-bottom: 0.5rem; }
         .stat-card .value { font-size: 1.75rem; font-weight: 700; }
@@ -18,9 +21,21 @@
         .stat-card .value.yellow { color: #facc15; }
         .stat-card .value.red { color: #f87171; }
         .stat-card .value.blue { color: #60a5fa; }
+
+        /* Filter bar */
+        .filter-bar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
+        .filter-bar select, .filter-bar input {
+            background: #1e293b; border: 1px solid #334155; color: #e2e8f0;
+            padding: 0.4rem 0.75rem; border-radius: 6px; font-size: 0.85rem;
+        }
+        .filter-bar select:focus, .filter-bar input:focus { outline: none; border-color: #3b82f6; }
+
+        /* Table */
         table { width: 100%; border-collapse: collapse; background: #1e293b; border-radius: 8px; overflow: hidden; }
         th { background: #334155; padding: 0.75rem 1rem; text-align: left; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; }
         td { padding: 0.75rem 1rem; border-top: 1px solid #334155; font-size: 0.875rem; }
+        tr:hover td { background: #1e293b80; }
+
         .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
         .badge.queued { background: #1e3a5f; color: #60a5fa; }
         .badge.running { background: #3b3a1e; color: #facc15; }
@@ -28,18 +43,51 @@
         .badge.failed { background: #3b1e1e; color: #f87171; }
         .badge.dead_letter { background: #3b1e1e; color: #f87171; }
         .badge.cancelled { background: #334155; color: #94a3b8; }
-        .refresh-btn { background: #3b82f6; color: white; border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.875rem; }
-        .refresh-btn:hover { background: #2563eb; }
+
+        .btn { background: #3b82f6; color: white; border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.875rem; }
+        .btn:hover { background: #2563eb; }
+        .btn-sm { padding: 0.3rem 0.7rem; font-size: 0.8rem; }
+        .btn-secondary { background: #334155; }
+        .btn-secondary:hover { background: #475569; }
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; }
+
+        /* Detail page */
+        .detail-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 1.5rem; }
+        .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 1.5rem; }
+        .detail-card { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 1.25rem; }
+        .detail-card h3 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin-bottom: 0.75rem; }
+        .detail-card.full-width { grid-column: 1 / -1; }
+
+        .kv-table { width: 100%; }
+        .kv-table td { padding: 0.3rem 0.5rem; font-size: 0.85rem; border: none; }
+        .kv-table td:first-child { color: #94a3b8; width: 140px; white-space: nowrap; }
+        .kv-table td:last-child { color: #e2e8f0; word-break: break-all; }
+
+        pre { background: #0f172a; border: 1px solid #334155; border-radius: 6px; padding: 1rem; overflow-x: auto; font-size: 0.8rem; line-height: 1.5; color: #cbd5e1; max-height: 400px; overflow-y: auto; }
+        .mono { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.8rem; }
+
+        .timeline { list-style: none; padding-left: 0; }
+        .timeline li { padding: 0.4rem 0; border-bottom: 1px solid #1e293b; display: flex; gap: 1rem; align-items: baseline; font-size: 0.85rem; }
+        .timeline li:last-child { border-bottom: none; }
+        .timeline .time { color: #64748b; font-family: monospace; font-size: 0.8rem; white-space: nowrap; min-width: 160px; }
+        .timeline .event { color: #60a5fa; font-weight: 600; min-width: 100px; }
+        .timeline .msg { color: #cbd5e1; }
+
+        .attempt-card { background: #0f172a; border: 1px solid #334155; border-radius: 6px; padding: 1rem; margin-bottom: 0.75rem; }
+        .attempt-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
+        .attempt-no { font-weight: 600; color: #60a5fa; }
+        .attempt-stats { display: flex; gap: 1.5rem; font-size: 0.8rem; color: #94a3b8; }
+        .attempt-stats span span { color: #e2e8f0; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
             <h1>LLM Service Dashboard</h1>
-            <button class="refresh-btn" hx-get="/dashboard" hx-target="body" hx-swap="outerHTML">Refresh</button>
+            <button class="btn" hx-get="/dashboard" hx-target="body" hx-swap="outerHTML">Refresh</button>
         </div>
 
+        <!-- Stats -->
         <div class="stats">
             <div class="stat-card">
                 <div class="label">Total Tasks</div>
@@ -61,9 +109,38 @@
                 <div class="label">Failed / Dead</div>
                 <div class="value red">{{ by_status.get('failed', 0) + by_status.get('dead_letter', 0) }}</div>
             </div>
+            <div class="stat-card">
+                <div class="label">Total Tokens</div>
+                <div class="value blue">{{ "{:,}".format(total_tokens) }}</div>
+            </div>
         </div>
 
-        <h2 style="font-size: 1.1rem; margin-bottom: 0.75rem; color: #f8fafc;">Recent Tasks</h2>
+        <!-- Filters -->
+        <h2>Tasks</h2>
+        <form class="filter-bar" id="filter-form" hx-get="/dashboard" hx-target="body" hx-swap="outerHTML">
+            <select name="status">
+                <option value="">All Status</option>
+                {% for s in all_statuses %}
+                <option value="{{ s }}" {{ 'selected' if filter_status == s else '' }}>{{ s }}</option>
+                {% endfor %}
+            </select>
+            <select name="domain">
+                <option value="">All Domains</option>
+                {% for d in all_domains %}
+                <option value="{{ d }}" {{ 'selected' if filter_domain == d else '' }}>{{ d }}</option>
+                {% endfor %}
+            </select>
+            <select name="stage">
+                <option value="">All Stages</option>
+                {% for st in all_stages %}
+                <option value="{{ st }}" {{ 'selected' if filter_stage == st else '' }}>{{ st }}</option>
+                {% endfor %}
+            </select>
+            <button type="submit" class="btn btn-sm">Filter</button>
+            <a href="/dashboard" class="btn btn-sm btn-secondary" style="text-decoration:none;">Clear</a>
+        </form>
+
+        <!-- Task List -->
         <table>
             <thead>
                 <tr>
@@ -72,20 +149,27 @@
                     <th>Stage</th>
                     <th>Status</th>
                     <th>Attempts</th>
+                    <th>Tokens</th>
+                    <th>Latency</th>
                     <th>Created</th>
                 </tr>
             </thead>
             <tbody>
-                {% for task in recent %}
+                {% for task in tasks %}
                 <tr>
-                    <td style="font-family: monospace; font-size: 0.8rem;">{{ task.id[:8] }}...</td>
+                    <td><a href="/dashboard/tasks/{{ task.id }}" class="mono">{{ task.id[:8] }}...</a></td>
                     <td>{{ task.caller_domain }}</td>
                     <td>{{ task.pipeline_stage }}</td>
                     <td><span class="badge {{ task.status }}">{{ task.status }}</span></td>
                     <td>{{ task.attempt_count }}</td>
-                    <td style="color: #94a3b8;">{{ task.created_at[:19] }}</td>
+                    <td>{{ task.total_tokens or '-' }}</td>
+                    <td>{{ task.latency_ms ~ 'ms' if task.latency_ms else '-' }}</td>
+                    <td style="color: #94a3b8;">{{ task.created_at[:19].replace('T', ' ') }}</td>
                 </tr>
                 {% endfor %}
+                {% if not tasks %}
+                <tr><td colspan="8" style="text-align:center;color:#64748b;padding:2rem;">No tasks found</td></tr>
+                {% endif %}
             </tbody>
         </table>
     </div>

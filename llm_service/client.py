@@ -45,6 +45,7 @@ class LLMClient:
         ref_id: str | None = None,
         build_id: str | None = None,
         release_id: str | None = None,
+        request_id: str | None = None,
         idempotency_key: str | None = None,
         max_attempts: int = 3,
         priority: int = 100,
@@ -66,6 +67,7 @@ class LLMClient:
             ("ref_id", ref_id),
             ("build_id", build_id),
             ("release_id", release_id),
+            ("request_id", request_id),
             ("idempotency_key", idempotency_key),
         ]:
             if v is not None:

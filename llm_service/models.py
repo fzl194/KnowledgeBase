@@ -24,6 +24,7 @@ class TaskSubmitRequest(BaseModel):
     ref_id: str | None = None
     build_id: str | None = None
     release_id: str | None = None
+    request_id: str | None = None
     idempotency_key: str | None = None
     max_attempts: int = Field(default=3, ge=1, le=10)
     priority: int = Field(default=100, ge=1)

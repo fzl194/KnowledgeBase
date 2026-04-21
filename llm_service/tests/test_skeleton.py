@@ -32,5 +32,5 @@ async def test_config_defaults():
 async def test_fastapi_app_creates():
     from llm_service.main import create_app
 
-    app = create_app()
+    app = create_app(start_worker=False)
     assert app.title == "LLM Service"
