@@ -76,6 +76,52 @@ class AssetRepository:
             document_snapshot_map=document_snapshot_map,
         )
 
+    async def resolve_segments_by_ids(
+        self,
+        segment_ids: list[str],
+        snapshot_ids: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch raw segments by ID list, constrained to active snapshots.
+
+        v1.2: Direct ID-based query (no JSON parsing needed).
+        Used by assembler when source_segment_id is available.
+        """
+        if not segment_ids:
+            return []
+
+        placeholders = ",".join("?" for _ in segment_ids)
+        params: list[str] = list(segment_ids)
+
+        snapshot_filter = ""
+        if snapshot_ids:
+            snap_ph = ",".join("?" for _ in snapshot_ids)
+            snapshot_filter = f" AND rs.document_snapshot_id IN ({snap_ph})"
+            params.extend(snapshot_ids)
+
+        sql = f"""
+            SELECT
+                rs.id,
+                rs.document_snapshot_id,
+                rs.raw_text,
+                rs.block_type,
+                rs.semantic_role,
+                rs.section_path,
+                rs.entity_refs_json,
+                rs.source_offsets_json,
+                ds.title AS snapshot_title,
+                d.id AS document_id,
+                d.document_key,
+                dsl.relative_path
+            FROM asset_raw_segments rs
+            LEFT JOIN asset_document_snapshots ds ON rs.document_snapshot_id = ds.id
+            LEFT JOIN asset_document_snapshot_links dsl ON ds.id = dsl.document_snapshot_id
+            LEFT JOIN asset_documents d ON dsl.document_id = d.id
+            WHERE rs.id IN ({placeholders})
+            {snapshot_filter}
+        """
+        cursor = await self._db.execute(sql, params)
+        return [dict(row) for row in await cursor.fetchall()]
+
     async def resolve_source_segments(
         self,
         source_refs_json: str | None,

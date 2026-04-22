@@ -132,8 +132,12 @@ class TestQueryPlannerFacade:
 
 class TestLLMProviders:
     def test_normalizer_returns_none_when_no_client(self):
+        import asyncio
         provider = LLMNormalizerProvider()
-        assert provider.normalize("test") is None
+        result = asyncio.get_event_loop().run_until_complete(
+            provider.normalize("test"),
+        )
+        assert result is None
 
     def test_reranker_returns_none_when_no_client(self):
         import asyncio
@@ -173,3 +177,302 @@ class TestJsonUtils:
 
     def test_safe_json_parse_invalid(self):
         assert safe_json_parse("not json") == {}
+
+
+# --- v1.2 Tests ---
+
+
+class TestV12Deduplication:
+    """Step 1.5: raw_text / contextual_text dedup by source_segment_id."""
+
+    @pytest.mark.asyncio
+    async def test_dedup_keeps_higher_score(self):
+        reranker = ScoreReranker()
+        plan = QueryPlan(budget=RetrievalBudget(max_items=10))
+        candidates = [
+            RetrievalCandidate(
+                retrieval_unit_id="ru-raw", score=0.9, source="fts",
+                metadata={"unit_type": "raw_text", "source_segment_id": "seg-1"},
+            ),
+            RetrievalCandidate(
+                retrieval_unit_id="ru-ctx", score=0.7, source="fts",
+                metadata={"unit_type": "contextual_text", "source_segment_id": "seg-1"},
+            ),
+        ]
+        result = await reranker.rerank(candidates, plan)
+        ids = [c.retrieval_unit_id for c in result]
+        assert "ru-raw" in ids
+        assert "ru-ctx" not in ids  # Deduped — lower score
+
+    @pytest.mark.asyncio
+    async def test_different_segments_not_deduped(self):
+        reranker = ScoreReranker()
+        plan = QueryPlan(budget=RetrievalBudget(max_items=10))
+        candidates = [
+            RetrievalCandidate(
+                retrieval_unit_id="ru-1", score=0.9, source="fts",
+                metadata={"unit_type": "raw_text", "source_segment_id": "seg-1"},
+            ),
+            RetrievalCandidate(
+                retrieval_unit_id="ru-2", score=0.7, source="fts",
+                metadata={"unit_type": "raw_text", "source_segment_id": "seg-2"},
+            ),
+        ]
+        result = await reranker.rerank(candidates, plan)
+        assert len(result) == 2
+
+    @pytest.mark.asyncio
+    async def test_entity_card_not_deduped(self):
+        reranker = ScoreReranker()
+        plan = QueryPlan(budget=RetrievalBudget(max_items=10))
+        candidates = [
+            RetrievalCandidate(
+                retrieval_unit_id="ru-entity-1", score=0.9, source="fts",
+                metadata={"unit_type": "entity_card", "source_segment_id": "seg-1"},
+            ),
+            RetrievalCandidate(
+                retrieval_unit_id="ru-raw", score=0.7, source="fts",
+                metadata={"unit_type": "raw_text", "source_segment_id": "seg-1"},
+            ),
+        ]
+        result = await reranker.rerank(candidates, plan)
+        assert len(result) == 2  # entity_card passes through dedup
+
+
+class TestV12Downweight:
+    """Step 2.1: Low-value block_type downweight."""
+
+    @pytest.mark.asyncio
+    async def test_heading_downweighted(self):
+        reranker = ScoreReranker()
+        plan = QueryPlan(budget=RetrievalBudget(max_items=10))
+        candidates = [
+            RetrievalCandidate(
+                retrieval_unit_id="ru-heading", score=1.0, source="fts",
+                metadata={"block_type": "heading"},
+            ),
+            RetrievalCandidate(
+                retrieval_unit_id="ru-para", score=1.0, source="fts",
+                metadata={"block_type": "paragraph"},
+            ),
+        ]
+        result = await reranker.rerank(candidates, plan)
+        # paragraph should rank higher (heading was downweighted)
+        assert result[0].retrieval_unit_id == "ru-para"
+
+    @pytest.mark.asyncio
+    async def test_toc_downweighted(self):
+        reranker = ScoreReranker()
+        plan = QueryPlan(budget=RetrievalBudget(max_items=10))
+        candidates = [
+            RetrievalCandidate(
+                retrieval_unit_id="ru-toc", score=1.0, source="fts",
+                metadata={"block_type": "toc"},
+            ),
+            RetrievalCandidate(
+                retrieval_unit_id="ru-para", score=0.5, source="fts",
+                metadata={"block_type": "paragraph"},
+            ),
+        ]
+        result = await reranker.rerank(candidates, plan)
+        # paragraph (0.5) still beats toc (1.0 * 0.3 = 0.3)
+        assert result[0].retrieval_unit_id == "ru-para"
+
+
+class TestV12RuleScoring:
+    """Step 2.2: Rule-based scoring boost."""
+
+    @pytest.mark.asyncio
+    async def test_intent_role_boost(self):
+        reranker = ScoreReranker()
+        plan = QueryPlan(desired_roles=["parameter"])
+        candidates = [
+            RetrievalCandidate(
+                retrieval_unit_id="ru-concept", score=1.0, source="fts",
+                metadata={"semantic_role": "concept"},
+            ),
+            RetrievalCandidate(
+                retrieval_unit_id="ru-param", score=1.0, source="fts",
+                metadata={"semantic_role": "parameter"},
+            ),
+        ]
+        result = await reranker.rerank(candidates, plan)
+        assert result[0].retrieval_unit_id == "ru-param"
+        assert result[0].score > result[1].score
+
+    @pytest.mark.asyncio
+    async def test_scope_boost(self):
+        reranker = ScoreReranker()
+        plan = QueryPlan(
+            scope_constraints={"products": ["UDG"]},
+            budget=RetrievalBudget(max_items=10),
+        )
+        candidates = [
+            RetrievalCandidate(
+                retrieval_unit_id="ru-match", score=1.0, source="fts",
+                metadata={"facets_json": '{"products": ["UDG"]}'},
+            ),
+            RetrievalCandidate(
+                retrieval_unit_id="ru-nomatch", score=1.0, source="fts",
+                metadata={"facets_json": '{"products": ["UNC"]}'},
+            ),
+        ]
+        result = await reranker.rerank(candidates, plan)
+        assert result[0].retrieval_unit_id == "ru-match"
+
+    @pytest.mark.asyncio
+    async def test_entity_boost(self):
+        reranker = ScoreReranker()
+        plan = QueryPlan(
+            keywords=["add apn"],
+            budget=RetrievalBudget(max_items=10),
+        )
+        candidates = [
+            RetrievalCandidate(
+                retrieval_unit_id="ru-entity", score=1.0, source="fts",
+                metadata={"entity_refs_json": '[{"type": "command", "name": "ADD APN", "normalized_name": "add apn"}]'},
+            ),
+            RetrievalCandidate(
+                retrieval_unit_id="ru-noentity", score=1.0, source="fts",
+                metadata={"entity_refs_json": "[]"},
+            ),
+        ]
+        result = await reranker.rerank(candidates, plan)
+        assert result[0].retrieval_unit_id == "ru-entity"
+
+
+class TestV12SourceSegmentIdBridge:
+    """Step 1.2: Assembler source_segment_id 4-layer priority."""
+
+    def test_source_segment_id_highest_priority(self):
+        from agent_serving.serving.application.assembler import ContextAssembler
+        from unittest.mock import MagicMock
+
+        assembler = ContextAssembler(MagicMock(), MagicMock())
+        candidate = RetrievalCandidate(
+            retrieval_unit_id="ru-1", score=0.9, source="fts",
+            metadata={
+                "source_segment_id": "seg-primary",
+                "source_refs_json": '{"raw_segment_ids": ["seg-secondary"]}',
+                "target_type": "raw_segment",
+                "target_ref_json": '{"raw_segment_id": "seg-tertiary"}',
+            },
+        )
+        result = assembler._resolve_candidate_sources(candidate)
+        assert result == ["seg-primary"]
+
+    def test_source_refs_json_fallback(self):
+        from agent_serving.serving.application.assembler import ContextAssembler
+        from unittest.mock import MagicMock
+
+        assembler = ContextAssembler(MagicMock(), MagicMock())
+        candidate = RetrievalCandidate(
+            retrieval_unit_id="ru-1", score=0.9, source="fts",
+            metadata={
+                "source_refs_json": '{"raw_segment_ids": ["seg-from-refs"]}',
+                "target_type": "raw_segment",
+                "target_ref_json": '{"raw_segment_id": "seg-from-target"}',
+            },
+        )
+        result = assembler._resolve_candidate_sources(candidate)
+        assert result == ["seg-from-refs"]
+
+    def test_target_ref_json_fallback(self):
+        from agent_serving.serving.application.assembler import ContextAssembler
+        from unittest.mock import MagicMock
+
+        assembler = ContextAssembler(MagicMock(), MagicMock())
+        candidate = RetrievalCandidate(
+            retrieval_unit_id="ru-1", score=0.9, source="fts",
+            metadata={
+                "target_type": "raw_segment",
+                "target_ref_json": '{"raw_segment_id": "seg-from-target"}',
+            },
+        )
+        result = assembler._resolve_candidate_sources(candidate)
+        assert result == ["seg-from-target"]
+
+    def test_empty_fallback(self):
+        from agent_serving.serving.application.assembler import ContextAssembler
+        from unittest.mock import MagicMock
+
+        assembler = ContextAssembler(MagicMock(), MagicMock())
+        candidate = RetrievalCandidate(
+            retrieval_unit_id="ru-1", score=0.9, source="fts",
+            metadata={},
+        )
+        result = assembler._resolve_candidate_sources(candidate)
+        assert result == []
+
+
+class TestV12FTSORQuery:
+    """Step 1.3: FTS5 OR query builder."""
+
+    def test_or_query_building(self):
+        from agent_serving.serving.retrieval.bm25_retriever import _build_fts_or_query
+        result = _build_fts_or_query(["5G", "eMBB", "概念"])
+        assert "OR" in result
+        assert '"5G"' in result
+        assert '"eMBB"' in result
+        assert '"概念"' in result
+
+    def test_or_query_empty_tokens(self):
+        from agent_serving.serving.retrieval.bm25_retriever import _build_fts_or_query
+        result = _build_fts_or_query([])
+        assert result == ""
+
+    def test_or_query_single_token(self):
+        from agent_serving.serving.retrieval.bm25_retriever import _build_fts_or_query
+        result = _build_fts_or_query(["5G"])
+        assert result == '"5G"'
+
+    def test_or_query_escapes_quotes(self):
+        from agent_serving.serving.retrieval.bm25_retriever import _build_fts_or_query
+        result = _build_fts_or_query(['test"value'])
+        assert '""' in result
+
+
+class TestV12LLMNormalizerFallback:
+    """Step 3.2: LLM normalizer fallback to rule-based."""
+
+    def test_sync_normalize_uses_rules(self):
+        from agent_serving.serving.application.normalizer import QueryNormalizer
+        normalizer = QueryNormalizer()
+        result = normalizer.normalize("什么是5G")
+        assert result.intent == "concept_lookup"
+        assert "5G" in result.keywords
+
+    @pytest.mark.asyncio
+    async def test_async_normalize_fallback_when_no_llm(self):
+        from agent_serving.serving.application.normalizer import QueryNormalizer
+        normalizer = QueryNormalizer()
+        result = await normalizer.anormalize("ADD APN命令怎么写")
+        assert result.intent == "command_usage"
+        assert len(result.entities) > 0
+
+
+class TestV12LLMPlannerFallback:
+    """Step 3.3: LLM planner fallback to rule-based."""
+
+    def test_sync_plan_uses_rules(self):
+        from agent_serving.serving.pipeline.query_planner import QueryPlanner, RulePlannerProvider
+        planner = QueryPlanner(RulePlannerProvider())
+        normalized = NormalizedQuery(
+            original_query="ADD APN",
+            intent="command_usage",
+            keywords=["ADD", "APN"],
+        )
+        plan = planner.plan(normalized)
+        assert plan.intent == "command_usage"
+
+    @pytest.mark.asyncio
+    async def test_async_plan_fallback_when_no_llm(self):
+        from agent_serving.serving.pipeline.query_planner import LLMPlannerProvider
+        provider = LLMPlannerProvider()
+        normalized = NormalizedQuery(
+            original_query="test",
+            intent="general",
+            keywords=["test"],
+        )
+        plan = await provider.abuild_plan(normalized)
+        assert plan.intent == "general"

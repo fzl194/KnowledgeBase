@@ -84,10 +84,13 @@ class ContextAssembler:
                 unique_seg_ids.append(sid)
 
         # 3. Fetch source segments (constrained to active build snapshots)
-        source_segments = await self._repo.resolve_source_segments(
-            json.dumps({"raw_segment_ids": unique_seg_ids}) if unique_seg_ids else None,
-            snapshot_ids=scope.snapshot_ids,
-        )
+        # v1.2: Use resolve_segments_by_ids for direct ID lookup
+        if unique_seg_ids:
+            source_segments = await self._repo.resolve_segments_by_ids(
+                unique_seg_ids, snapshot_ids=scope.snapshot_ids,
+            )
+        else:
+            source_segments = []
         source_seg_map = {str(s["id"]): s for s in source_segments}
 
         # Build source items
@@ -106,8 +109,10 @@ class ContextAssembler:
                 snapshot_ids=scope.snapshot_ids,
             )
 
-            # Fetch expanded segment data
-            expanded_data = await self._graph.fetch_expanded_segments(expansions)
+            # Fetch expanded segment data (constrained to active snapshots)
+            expanded_data = await self._graph.fetch_expanded_segments(
+                expansions, snapshot_ids=scope.snapshot_ids,
+            )
             expanded_items = self._build_expanded_items(expanded_data)
 
             # Build relation links from expansions
@@ -198,20 +203,26 @@ class ContextAssembler:
         return items
 
     def _resolve_candidate_sources(self, candidate: RetrievalCandidate) -> list[str]:
-        """Resolve source segment IDs with 3-layer priority.
+        """Resolve source segment IDs with 4-layer priority.
 
         Priority:
-        1. source_refs_json.raw_segment_ids (preferred)
-        2. target_type/target_ref_json (fallback for summary/entity_card units)
-        3. Returns empty list (snapshot-level fallback handled at assembly level)
+        1. source_segment_id (v1.2 primary bridge — strongest link)
+        2. source_refs_json.raw_segment_ids (provenance metadata)
+        3. target_type/target_ref_json (fallback for summary/entity_card units)
+        4. Returns empty list (snapshot-level fallback handled at assembly level)
         """
-        # Layer 1: source_refs_json
+        # Layer 1: source_segment_id (v1.2 primary bridge)
+        seg_id = candidate.metadata.get("source_segment_id")
+        if seg_id:
+            return [seg_id]
+
+        # Layer 2: source_refs_json
         source_refs = candidate.metadata.get("source_refs_json", "{}")
         seg_ids = parse_source_refs(source_refs)
         if seg_ids:
             return seg_ids
 
-        # Layer 2: target_ref_json
+        # Layer 3: target_ref_json
         target_type = candidate.metadata.get("target_type", "")
         target_ref = candidate.metadata.get("target_ref_json", "{}")
         if target_type and target_ref and target_ref != "{}":
@@ -219,9 +230,7 @@ class ContextAssembler:
             if seg_ids:
                 return seg_ids
 
-        # Layer 3: No direct segment refs — returns empty
-        # (snapshot-level fallback would fetch all segments from snapshot,
-        # but is deferred until actual need arises)
+        # Layer 4: No direct segment refs — returns empty
         return []
 
     def _build_source_items(

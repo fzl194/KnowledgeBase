@@ -45,11 +45,20 @@ def _is_cjk(char: str) -> bool:
     )
 
 
-def _escape_fts_query(text: str) -> str:
-    """Escape FTS5 special characters by wrapping as phrase query."""
-    # Wrap in double-quotes to make it a phrase query,
-    # escaping any internal quotes by doubling them.
-    return '"' + text.replace('"', '""') + '"'
+def _build_fts_or_query(tokens: list[str]) -> str:
+    """Build FTS5 OR query from tokens.
+
+    Each token is individually double-quoted and joined with OR.
+    This gives per-token matching instead of phrase matching,
+    significantly improving Chinese recall.
+    """
+    escaped = []
+    for t in tokens:
+        t = t.strip()
+        if not t:
+            continue
+        escaped.append('"' + t.replace('"', '""') + '"')
+    return " OR ".join(escaped)
 
 
 class FTS5BM25Retriever(Retriever):
@@ -70,9 +79,10 @@ class FTS5BM25Retriever(Retriever):
         if not snapshot_ids or not plan.keywords:
             return []
 
-        # Build FTS query from keywords
+        # Build FTS OR query from keywords (v1.2: OR semantics)
         fts_tokens = _tokenize_for_fts(" ".join(plan.keywords))
-        fts_query = _escape_fts_query(fts_tokens)
+        token_list = [t for t in fts_tokens.split() if t]
+        fts_query = _build_fts_or_query(token_list)
         if not fts_query:
             return []
 
@@ -92,6 +102,8 @@ class FTS5BM25Retriever(Retriever):
                 ru.facets_json,
                 ru.target_type,
                 ru.target_ref_json,
+                ru.unit_type,
+                ru.source_segment_id,
                 bm25(asset_retrieval_units_fts) AS fts_score
             FROM asset_retrieval_units_fts fts
             JOIN asset_retrieval_units ru ON ru.id = fts.retrieval_unit_id
@@ -140,7 +152,9 @@ class FTS5BM25Retriever(Retriever):
                 ru.source_refs_json,
                 ru.facets_json,
                 ru.target_type,
-                ru.target_ref_json
+                ru.target_ref_json,
+                ru.unit_type,
+                ru.source_segment_id
             FROM asset_retrieval_units ru
             WHERE ({like_clauses})
               AND ru.document_snapshot_id IN ({placeholders})
@@ -196,5 +210,7 @@ class FTS5BM25Retriever(Retriever):
                 "facets_json": r.get("facets_json", "{}"),
                 "target_type": r.get("target_type", ""),
                 "target_ref_json": r.get("target_ref_json", "{}"),
+                "unit_type": r.get("unit_type", ""),
+                "source_segment_id": r.get("source_segment_id"),
             },
         )

@@ -24,7 +24,24 @@ def load_sqlite_ddl() -> str:
 
 
 async def create_asset_tables_sqlite(db: aiosqlite.Connection) -> None:
-    """Create all asset tables in a SQLite database using shared DDL."""
+    """Create all asset tables in a SQLite database using shared DDL.
+
+    After loading the shared DDL, applies v1.2 migrations that Mining
+    will eventually write to the canonical schema. This keeps Serving
+    tests ahead of the shared DDL without forking it.
+    """
     ddl = load_sqlite_ddl()
     await db.executescript(ddl)
+
+    # v1.2 migration: source_segment_id bridge column on retrieval_units
+    # Mining will add this to the canonical DDL; until then, ALTER here.
+    try:
+        await db.execute(
+            "ALTER TABLE asset_retrieval_units "
+            "ADD COLUMN source_segment_id TEXT NULL "
+            "REFERENCES asset_raw_segments(id) ON DELETE SET NULL"
+        )
+    except Exception:
+        pass  # Column already exists —Mining's DDL caught up
+
     await db.commit()

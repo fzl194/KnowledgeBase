@@ -85,8 +85,12 @@ class GraphExpander:
     async def fetch_expanded_segments(
         self,
         expansions: list[dict[str, Any]],
+        snapshot_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Fetch full segment data for expanded segment IDs."""
+        """Fetch full segment data for expanded segment IDs.
+
+        v1.2: snapshot_ids constrains results to active build snapshots.
+        """
         if not expansions:
             return []
 
@@ -94,6 +98,14 @@ class GraphExpander:
         expansion_map = {e["segment_id"]: e for e in expansions}
 
         placeholders = ",".join("?" for _ in segment_ids)
+        params: list[str] = list(segment_ids)
+
+        snapshot_filter = ""
+        if snapshot_ids:
+            snap_ph = ",".join("?" for _ in snapshot_ids)
+            snapshot_filter = f" AND rs.document_snapshot_id IN ({snap_ph})"
+            params.extend(snapshot_ids)
+
         sql = f"""
             SELECT
                 rs.id,
@@ -112,8 +124,9 @@ class GraphExpander:
             LEFT JOIN asset_document_snapshot_links dsl ON ds.id = dsl.document_snapshot_id
             LEFT JOIN asset_documents d ON dsl.document_id = d.id
             WHERE rs.id IN ({placeholders})
+            {snapshot_filter}
         """
-        cursor = await self._db.execute(sql, segment_ids)
+        cursor = await self._db.execute(sql, params)
         rows = await cursor.fetchall()
 
         results = []
@@ -143,7 +156,7 @@ class GraphExpander:
 
         placeholders = ",".join("?" for _ in segment_ids)
         type_filter = ""
-        params: list[str] = list(segment_ids) + list(segment_ids)
+        params: list[str] = list(segment_ids)
 
         if relation_types:
             type_placeholders = ",".join("?" for _ in relation_types)
@@ -163,8 +176,18 @@ class GraphExpander:
                 f" AND rs_src.document_snapshot_id IN ({snap_ph})"
                 f" AND rs_tgt.document_snapshot_id IN ({snap_ph})"
             )
-            params.extend(snapshot_ids)
-            params.extend(snapshot_ids)
+            # First SELECT: segment_ids + type + 2×snapshot
+            # Second SELECT: segment_ids + type + 2×snapshot
+            # Total: extend params for second SELECT's params
+            params2: list[str] = list(segment_ids)
+            if relation_types:
+                params2.extend(relation_types)
+            if snapshot_ids:
+                params.extend(snapshot_ids)
+                params.extend(snapshot_ids)
+                params2.extend(snapshot_ids)
+                params2.extend(snapshot_ids)
+            params.extend(params2)
 
         sql = f"""
             SELECT
@@ -174,6 +197,8 @@ class GraphExpander:
             FROM asset_raw_segment_relations rel
             {snapshot_join}
             WHERE rel.source_segment_id IN ({placeholders})
+            {type_filter}
+            {snapshot_filter}
             UNION ALL
             SELECT
                 rel.target_segment_id AS from_id,

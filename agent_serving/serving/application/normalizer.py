@@ -8,6 +8,7 @@ Outputs NormalizedQuery with entities, scope, keywords, intent.
 """
 from __future__ import annotations
 
+import logging
 import re
 
 from agent_serving.serving.schemas.constants import (
@@ -23,6 +24,8 @@ from agent_serving.serving.schemas.models import (
 )
 from agent_serving.serving.application.normalizer_config import NormalizerConfig
 from agent_serving.serving.application.planner import LLMRuntimeClient
+
+logger = logging.getLogger(__name__)
 
 
 # --- Default patterns ---
@@ -77,6 +80,16 @@ _STOPWORDS_EN = {
 _ALL_STOPWORDS = _STOPWORDS_ZH | _STOPWORDS_EN
 
 
+def _is_cjk(char: str) -> bool:
+    """Check if a single character is CJK."""
+    cp = ord(char)
+    return (
+        (0x4E00 <= cp <= 0x9FFF)
+        or (0x3400 <= cp <= 0x4DBF)
+        or (0x2E80 <= cp <= 0x2EFF)
+    )
+
+
 class QueryNormalizer:
     """Two-layer normalizer: LLM-first, rule-based fallback."""
 
@@ -89,19 +102,55 @@ class QueryNormalizer:
         self._cfg = config or NormalizerConfig()
 
     def normalize(self, query: str) -> NormalizedQuery:
-        """Normalize query. LLM path when available, rule-based fallback."""
+        """Synchronous normalize — rule-based only (fast path).
+
+        For LLM path, use anormalize() instead.
+        """
+        return self._rule_normalize(query)
+
+    async def anormalize(self, query: str) -> NormalizedQuery:
+        """Async normalize — LLM first, rule-based fallback."""
         if self._llm and self._llm.is_available():
-            llm_result = self._try_llm_normalize(query)
+            llm_result = await self._try_llm_normalize(query)
             if llm_result:
                 return llm_result
 
         return self._rule_normalize(query)
 
-    def _try_llm_normalize(self, query: str) -> NormalizedQuery | None:
-        """Attempt LLM-based normalization. Returns None on failure."""
-        # v1.1: LLM normalization not yet connected
-        # Future: call self._llm.complete() with structured prompt
-        return None
+    async def _try_llm_normalize(self, query: str) -> NormalizedQuery | None:
+        """Attempt LLM-based normalization via LLMRuntimeClient."""
+        if not self._llm:
+            return None
+        try:
+            result = await self._llm.execute(
+                pipeline_stage="normalizer",
+                template_key="serving-query-understanding",
+                input={"query": query},
+                expected_output_type="json_object",
+            )
+            parsed = result.get("parsed_output", {})
+            if not parsed:
+                return None
+
+            entities = []
+            for e in parsed.get("entities", []):
+                entities.append(EntityRef(
+                    type=e.get("type", "unknown"),
+                    name=e.get("name", ""),
+                    normalized_name=e.get("normalized_name", e.get("name", "")),
+                ))
+
+            return NormalizedQuery(
+                original_query=query,
+                intent=parsed.get("intent", INTENT_GENERAL),
+                entities=entities,
+                scope=parsed.get("scope", {}),
+                keywords=parsed.get("keywords", []),
+                desired_roles=[],
+            )
+        except Exception:
+            logger.warning("LLM normalization failed, falling back to rules", exc_info=True)
+            return None
 
     def _rule_normalize(self, query: str) -> NormalizedQuery:
         """Rule-based normalization with regex patterns."""
@@ -185,8 +234,12 @@ class QueryNormalizer:
 
     def _extract_keywords(self, query: str) -> list[str]:
         cleaned = _DEFAULT_COMMAND_RE.sub("", query)
-        tokens = [t for t in re.split(r"[\s,，、？?。.！!]+", cleaned) if t]
+        try:
+            import jieba
+            tokens = list(jieba.cut(cleaned))
+        except ImportError:
+            tokens = [t for t in re.split(r"[\s,，、？?。.！!]+", cleaned) if t]
         return [
             t for t in tokens
-            if t not in _ALL_STOPWORDS and len(t) >= 2
+            if t not in _ALL_STOPWORDS and (len(t) >= 2 or _is_cjk(t))
         ]

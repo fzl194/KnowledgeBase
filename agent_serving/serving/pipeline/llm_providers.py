@@ -1,13 +1,7 @@
 """LLM provider interfaces — pluggable LLM-backed providers for each pipeline stage.
 
-Three provider slots:
-- LLMNormalizerProvider: replaces rule-based normalizer when LLM is available
-- LLMPlannerProvider: enriches QueryPlan via LLM (already in query_planner.py)
-- LLMRerankerProvider: replaces score-based reranker with LLM ranking
-
-All providers go through the unified LLM runtime client,
-not direct model calls. When the runtime is unavailable,
-each falls back to its rule-based default.
+v1.2: LLMNormalizerProvider now uses LLMRuntimeClient.execute() for real calls.
+LLMRerankerProvider remains as future slot.
 """
 from __future__ import annotations
 
@@ -21,16 +15,13 @@ from agent_serving.serving.schemas.models import (
     QueryPlan,
     RetrievalCandidate,
 )
+from agent_serving.serving.schemas.constants import INTENT_GENERAL
 
 logger = logging.getLogger(__name__)
 
 
 class LLMClient(Protocol):
-    """Unified LLM runtime client interface.
-
-    This is the contract that agent_llm_runtime must implement.
-    Serving never imports runtime internals — only this protocol.
-    """
+    """Protocol for LLM runtime client (backward compat)."""
 
     async def complete(
         self,
@@ -48,49 +39,75 @@ class LLMClient(Protocol):
 class LLMNormalizerProvider:
     """LLM-backed query normalization provider.
 
-    When available, sends the query to LLM for structured extraction:
-    intent, entities, scope, keywords.
-    Falls back to rule-based normalizer when LLM is unavailable.
+    v1.2: Uses LLMRuntimeClient.execute() with pipeline_stage="normalizer".
+    Sends query for structured extraction: intent, entities, scope, keywords.
+    Falls back to rule-based when LLM is unavailable.
     """
 
-    def __init__(self, llm_client: LLMClient | None = None) -> None:
+    def __init__(self, llm_client: Any = None) -> None:
         self._llm = llm_client
 
-    def set_llm_client(self, client: LLMClient) -> None:
+    def set_llm_client(self, client: Any) -> None:
         self._llm = client
 
-    def normalize(self, query: str, fallback: Any = None) -> NormalizedQuery | None:
+    async def normalize(self, query: str) -> NormalizedQuery | None:
         """Attempt LLM normalization. Returns None if unavailable."""
-        if not self._llm or not self._llm.is_available():
+        if not self._llm:
             return None
         try:
-            return self._try_llm_normalize(query)
+            return await self._try_llm_normalize(query)
         except Exception:
             logger.warning("LLM normalization failed", exc_info=True)
             return None
 
-    def _try_llm_normalize(self, query: str) -> NormalizedQuery | None:
-        """Future: structured prompt → JSON NormalizedQuery.
+    async def _try_llm_normalize(self, query: str) -> NormalizedQuery | None:
+        """Call LLM runtime for structured query understanding."""
+        from agent_serving.serving.application.planner import LLMRuntimeClient
 
-        The prompt template will ask the LLM to extract:
-        intent, entities, scope, keywords from the query.
-        Response is parsed as JSON into NormalizedQuery.
-        """
-        # v1.1: not yet connected — requires agent_llm_runtime
-        return None
+        client = self._llm
+        if not isinstance(client, LLMRuntimeClient):
+            return None
+
+        result = await client.execute(
+            pipeline_stage="normalizer",
+            template_key="serving-query-understanding",
+            input={"query": query},
+            expected_output_type="json_object",
+        )
+
+        parsed = result.get("parsed_output", {})
+        if not parsed:
+            return None
+
+        entities = []
+        for e in parsed.get("entities", []):
+            entities.append(EntityRef(
+                type=e.get("type", "unknown"),
+                name=e.get("name", ""),
+                normalized_name=e.get("normalized_name", e.get("name", "")),
+            ))
+
+        return NormalizedQuery(
+            original_query=query,
+            intent=parsed.get("intent", INTENT_GENERAL),
+            entities=entities,
+            scope=parsed.get("scope", {}),
+            keywords=parsed.get("keywords", []),
+            desired_roles=[],
+        )
 
 
 class LLMRerankerProvider:
-    """LLM-backed reranking provider.
+    """LLM-backed reranking provider (future slot).
 
     When available, sends candidates to LLM for relevance scoring.
     Falls back to score-based reranker when LLM is unavailable.
     """
 
-    def __init__(self, llm_client: LLMClient | None = None) -> None:
+    def __init__(self, llm_client: Any = None) -> None:
         self._llm = llm_client
 
-    def set_llm_client(self, client: LLMClient) -> None:
+    def set_llm_client(self, client: Any) -> None:
         self._llm = client
 
     async def rerank(
@@ -99,7 +116,7 @@ class LLMRerankerProvider:
         plan: QueryPlan,
     ) -> list[RetrievalCandidate] | None:
         """Attempt LLM reranking. Returns None if unavailable."""
-        if not self._llm or not self._llm.is_available():
+        if not self._llm:
             return None
         try:
             return await self._try_llm_rerank(candidates, plan)
@@ -112,10 +129,5 @@ class LLMRerankerProvider:
         candidates: list[RetrievalCandidate],
         plan: QueryPlan,
     ) -> list[RetrievalCandidate] | None:
-        """Future: send candidates to LLM for relevance scoring.
-
-        The prompt template will include the query intent and
-        candidate texts, asking the LLM to score relevance.
-        """
-        # v1.1: not yet connected — requires agent_llm_runtime
+        """Future: send candidates to LLM for relevance scoring."""
         return None

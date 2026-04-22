@@ -43,6 +43,8 @@ REL_PREV = "dddd0000-0000-0000-0000-000000000002"
 
 RU_ADD_APN = "eeee0000-0000-0000-0000-000000000001"
 RU_5G = "eeee0000-0000-0000-0000-000000000002"
+RU_ADD_APN_CTX = "eeee0000-0000-0000-0000-000000000003"
+RU_5G_HEADING = "eeee0000-0000-0000-0000-000000000004"
 
 
 SEED_IDS = {
@@ -60,6 +62,8 @@ SEED_IDS = {
     "rs_5g_concept": RS_5G_CONCEPT,
     "ru_add_apn": RU_ADD_APN,
     "ru_5g": RU_5G,
+    "ru_add_apn_ctx": RU_ADD_APN_CTX,
+    "ru_5g_heading": RU_5G_HEADING,
 }
 
 
@@ -163,13 +167,13 @@ async def _seed_v11_data(db: aiosqlite.Connection) -> None:
         ],
     )
 
-    # retrieval_units
+    # retrieval_units (with source_segment_id bridge — v1.2 column)
     await db.executemany(
         "INSERT INTO asset_retrieval_units "
         "(id, document_snapshot_id, unit_key, unit_type, target_type, target_ref_json, title, "
         "text, search_text, block_type, semantic_role, facets_json, entity_refs_json, "
-        "source_refs_json, weight, created_at, metadata_json) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "source_refs_json, weight, created_at, metadata_json, source_segment_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (RU_ADD_APN, SNAP_UDG, "RU_ADD_APN", "raw_text", "raw_segment",
              json.dumps({"raw_segment_id": RS_ADD_APN_UDG}),
@@ -180,7 +184,7 @@ async def _seed_v11_data(db: aiosqlite.Connection) -> None:
              json.dumps({"products": ["UDG"]}),
              json.dumps([{"type": "command", "name": "ADD APN", "normalized_name": "ADD APN"}]),
              json.dumps({"raw_segment_ids": [RS_ADD_APN_UDG]}),
-             1.0, now, "{}"),
+             1.0, now, "{}", RS_ADD_APN_UDG),
             (RU_5G, SNAP_FEATURE, "RU_5G_INTRO", "raw_text", "raw_segment",
              json.dumps({"raw_segment_id": RS_5G_CONCEPT}),
              "5G概述",
@@ -190,7 +194,29 @@ async def _seed_v11_data(db: aiosqlite.Connection) -> None:
              json.dumps({"domains": ["5G"]}),
              json.dumps([{"type": "term", "name": "5G", "normalized_name": "5g"}]),
              json.dumps({"raw_segment_ids": [RS_5G_CONCEPT]}),
-             1.0, now, "{}"),
+             1.0, now, "{}", RS_5G_CONCEPT),
+            # contextual_text: same source_segment_id as RU_ADD_APN — for dedup test
+            (RU_ADD_APN_CTX, SNAP_UDG, "RU_ADD_APN_CTX", "contextual_text", "raw_segment",
+             json.dumps({"raw_segment_id": RS_ADD_APN_UDG}),
+             "[ADD APN] ADD APN 命令",
+             "[1.2 > ADD APN] ADD APN 命令用于在UDG上新增APN配置。语法：ADD APN=<apn-name>,[参数列表]",
+             "ADD APN 命令 新增 APN 配置 参数",
+             "paragraph", "parameter",
+             json.dumps({"products": ["UDG"]}),
+             json.dumps([{"type": "command", "name": "ADD APN", "normalized_name": "ADD APN"}]),
+             json.dumps({"raw_segment_ids": [RS_ADD_APN_UDG]}),
+             0.9, now, "{}", RS_ADD_APN_UDG),
+            # heading: low-value block type — for downweight test
+            (RU_5G_HEADING, SNAP_FEATURE, "RU_5G_HEADING", "raw_text", "raw_segment",
+             json.dumps({"raw_segment_id": RS_5G_CONCEPT}),
+             "5G概述",
+             "5G概述",
+             "5G 概述",
+             "heading", "concept",
+             json.dumps({"domains": ["5G"]}),
+             "[]",
+             json.dumps({"raw_segment_ids": [RS_5G_CONCEPT]}),
+             1.0, now, "{}", RS_5G_CONCEPT),
         ],
     )
 
