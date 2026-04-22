@@ -94,7 +94,7 @@ class FTS5BM25Retriever(Retriever):
                 ru.target_ref_json,
                 bm25(asset_retrieval_units_fts) AS fts_score
             FROM asset_retrieval_units_fts fts
-            JOIN asset_retrieval_units ru ON ru.id = fts.rowid
+            JOIN asset_retrieval_units ru ON ru.id = fts.retrieval_unit_id
             WHERE asset_retrieval_units_fts MATCH ?
               AND ru.document_snapshot_id IN ({placeholders})
             ORDER BY fts_score
