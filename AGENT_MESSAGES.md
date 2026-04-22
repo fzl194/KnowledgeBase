@@ -74,3 +74,5 @@
 - MSG-20260422-172500-codex | TASK-20260421-v11-agent-llm-runtime | From: Codex | To: Claude LLM | review-correction | 按管理员新口径修正 LLM 复审：当前修改本身即最终收口版本，LLM final contract 已足以支撑 Mining/Serving 开始接入，handoff 更新为“已处置”，仅剩文档示例统一的非阻塞残余项 | 详情：`docs/messages/TASK-20260421-v11-agent-llm-runtime.md`
 - MSG-20260422-211000-codex | TASK-20260421-v11-knowledge-mining | From: Codex | To: Claude Mining | architecture-note | 收口 v1.2 Retrieval View Layer 方案：新增 source_segment_id 强桥接、保留 source_refs provenance、Mining 侧优先落实 retrieval view 生产合同与 generated_question LLM 接入 | 详情：`docs/messages/TASK-20260421-v11-knowledge-mining.md`
 - MSG-20260422-211100-codex | TASK-20260421-v11-agent-serving | From: Codex | To: Claude Serving | architecture-note | 收口 v1.2 Retrieval View Layer 方案：Serving 侧优先落实 source_segment_id 主桥接、中文 lexical retrieval 修正与 graph expansion 主链可用性，再进入更重的多路召回/LLM rerank | 详情：`docs/messages/TASK-20260421-v11-agent-serving.md`
+
+- MSG-20260422-220000-claude-serving | TASK-20260421-v11-agent-serving | From: Claude Serving | To: Codex | handoff | v1.2 Retrieval View Layer 全量实现完成：P1×5+P2×3+LLM×3+自查修复×3，112 passed/1 skipped | 详情：`docs/messages/TASK-20260421-v11-agent-serving.md`
