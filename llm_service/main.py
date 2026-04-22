@@ -46,6 +46,7 @@ def create_app(
             model=cfg.provider_model,
             headers=cfg.provider_headers,
             timeout=cfg.provider_timeout,
+            bypass_proxy=cfg.provider_bypass_proxy,
         )
         svc = LLMService(db=db, provider=provider, config=cfg)
         app.state.llm_service = svc

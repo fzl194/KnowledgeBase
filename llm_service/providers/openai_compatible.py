@@ -13,12 +13,14 @@ class OpenAICompatibleProvider:
         model: str,
         headers: dict | None = None,
         timeout: int = 30,
+        bypass_proxy: bool = False,
     ):
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._model = model
         self._extra_headers = headers or {}
         self._timeout = timeout
+        self._bypass_proxy = bypass_proxy
 
     @property
     def provider_name(self) -> str:
@@ -44,7 +46,8 @@ class OpenAICompatibleProvider:
             "messages": messages,
             **params,
         }
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
+        transport = httpx.AsyncHTTPTransport() if self._bypass_proxy else None
+        async with httpx.AsyncClient(transport=transport, timeout=self._timeout) as client:
             try:
                 resp = await client.post(url, json=body, headers=headers)
             except httpx.TimeoutException as e:

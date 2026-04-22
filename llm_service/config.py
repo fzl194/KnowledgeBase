@@ -13,6 +13,7 @@ class LLMServiceConfig(BaseSettings):
     provider_model: str = "deepseek-chat"
     provider_headers: dict = Field(default_factory=dict)
     provider_timeout: int = 30
+    provider_bypass_proxy: bool = False
 
     worker_concurrency: int = 4
     default_max_attempts: int = 3
