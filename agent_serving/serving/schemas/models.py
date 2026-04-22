@@ -55,6 +55,18 @@ class ExpansionConfig(BaseModel):
     ])
 
 
+class RetrieverConfig(BaseModel):
+    """Controls which retrievers to activate and how to fuse results."""
+    enabled_retrievers: list[str] = Field(default_factory=lambda: ["fts_bm25"])
+    fusion_method: str = "identity"  # "identity" | "rrf"
+    rrf_k: int = 60
+
+
+class RerankerConfig(BaseModel):
+    """Controls reranker selection and parameters."""
+    reranker_type: str = "score"  # "score" | "llm" | "cross_encoder"
+
+
 class QueryPlan(BaseModel):
     intent: str = "general"
     keywords: list[str] = Field(default_factory=list)
@@ -64,6 +76,8 @@ class QueryPlan(BaseModel):
     desired_block_types: list[str] = Field(default_factory=list)
     budget: RetrievalBudget = Field(default_factory=RetrievalBudget)
     expansion: ExpansionConfig = Field(default_factory=ExpansionConfig)
+    retriever_config: RetrieverConfig = Field(default_factory=RetrieverConfig)
+    reranker_config: RerankerConfig = Field(default_factory=RerankerConfig)
 
 
 # --- Retrieval ---

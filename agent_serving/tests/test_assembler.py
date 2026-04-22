@@ -45,6 +45,8 @@ def _make_candidate(ru_id, text, source_refs_json="{}", **metadata_overrides):
         "text": text,
         "source_refs_json": source_refs_json,
         "facets_json": "{}",
+        "target_type": "",
+        "target_ref_json": "{}",
     }
     metadata.update(metadata_overrides)
     return RetrievalCandidate(
@@ -154,6 +156,55 @@ class TestSourceDrillDown:
         # Should have raw_segment items (context role)
         context_items = [i for i in pack.items if i.kind == "raw_segment"]
         assert len(context_items) >= 1
+
+    @pytest.mark.asyncio
+    async def test_target_ref_fallback(self, assembler, scope, seed_ids):
+        """When source_refs_json is empty, fall back to target_ref_json."""
+        target_ref = json.dumps({"raw_segment_id": seed_ids["rs_add_apn_udg"]})
+        candidate = _make_candidate(
+            seed_ids["ru_add_apn"],
+            "ADD APN",
+            source_refs_json="{}",  # No source_refs
+            target_type="raw_segment",
+            target_ref_json=target_ref,
+        )
+
+        pack = await assembler.assemble(
+            query="ADD APN",
+            normalized=_make_normalized(),
+            plan=_make_plan(),
+            scope=scope,
+            candidates=[candidate],
+        )
+
+        # Should still resolve the segment via target_ref_json fallback
+        context_items = [i for i in pack.items if i.kind == "raw_segment"]
+        assert len(context_items) >= 1
+
+    @pytest.mark.asyncio
+    async def test_no_refs_returns_seed_only(self, assembler, scope, seed_ids):
+        """When neither source_refs nor target_ref exists, only seed items."""
+        candidate = _make_candidate(
+            seed_ids["ru_add_apn"],
+            "ADD APN",
+            source_refs_json="{}",
+            target_type="",
+            target_ref_json="{}",
+        )
+
+        pack = await assembler.assemble(
+            query="ADD APN",
+            normalized=_make_normalized(),
+            plan=_make_plan(),
+            scope=scope,
+            candidates=[candidate],
+        )
+
+        # Only seed item, no context items
+        seed_items = [i for i in pack.items if i.role == "seed"]
+        context_items = [i for i in pack.items if i.role == "context"]
+        assert len(seed_items) == 1
+        assert len(context_items) == 0
 
 
 class TestGraphExpansion:

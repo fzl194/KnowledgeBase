@@ -11,6 +11,11 @@ from typing import Any
 
 import aiosqlite
 
+from agent_serving.serving.schemas.json_utils import (
+    parse_source_refs,
+    parse_target_ref,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -26,6 +31,7 @@ class GraphExpander:
         max_depth: int = 2,
         relation_types: list[str] | None = None,
         max_results: int = 20,
+        snapshot_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Expand from seed segments via BFS over relations.
 
@@ -51,7 +57,7 @@ class GraphExpander:
 
             # Get neighbors of current frontier
             neighbors = await self._get_neighbors(
-                current_frontier, relation_types,
+                current_frontier, relation_types, snapshot_ids,
             )
 
             next_frontier: list[str] = []
@@ -125,8 +131,13 @@ class GraphExpander:
         self,
         segment_ids: list[str],
         relation_types: list[str] | None = None,
+        snapshot_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Get neighboring segments via relations table."""
+        """Get neighboring segments via relations table.
+
+        When snapshot_ids is provided, only returns neighbors
+        that belong to the active build's snapshots.
+        """
         if not segment_ids:
             return []
 
@@ -139,12 +150,29 @@ class GraphExpander:
             type_filter = f" AND rel.relation_type IN ({type_placeholders})"
             params.extend(relation_types)
 
+        # When snapshot_ids provided, join raw_segments to filter by snapshot
+        snapshot_join = ""
+        snapshot_filter = ""
+        if snapshot_ids:
+            snap_ph = ",".join("?" for _ in snapshot_ids)
+            snapshot_join = (
+                " JOIN asset_raw_segments rs_src ON rel.source_segment_id = rs_src.id"
+                " JOIN asset_raw_segments rs_tgt ON rel.target_segment_id = rs_tgt.id"
+            )
+            snapshot_filter = (
+                f" AND rs_src.document_snapshot_id IN ({snap_ph})"
+                f" AND rs_tgt.document_snapshot_id IN ({snap_ph})"
+            )
+            params.extend(snapshot_ids)
+            params.extend(snapshot_ids)
+
         sql = f"""
             SELECT
                 rel.source_segment_id AS from_id,
                 rel.target_segment_id AS neighbor_id,
                 rel.relation_type
             FROM asset_raw_segment_relations rel
+            {snapshot_join}
             WHERE rel.source_segment_id IN ({placeholders})
             UNION ALL
             SELECT
@@ -152,24 +180,10 @@ class GraphExpander:
                 rel.source_segment_id AS neighbor_id,
                 rel.relation_type
             FROM asset_raw_segment_relations rel
+            {snapshot_join}
             WHERE rel.target_segment_id IN ({placeholders})
             {type_filter}
+            {snapshot_filter}
         """
         cursor = await self._db.execute(sql, params)
         return [dict(row) for row in await cursor.fetchall()]
-
-
-def parse_source_refs(source_refs_json: str | None) -> list[str]:
-    """Parse source_refs_json to extract raw_segment_ids.
-
-    source_refs_json format: {"raw_segment_ids": ["id1", "id2", ...]}
-    """
-    if not source_refs_json:
-        return []
-    try:
-        data = json.loads(source_refs_json)
-        if isinstance(data, dict):
-            return data.get("raw_segment_ids", [])
-        return []
-    except (json.JSONDecodeError, TypeError):
-        return []

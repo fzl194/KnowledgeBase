@@ -26,16 +26,20 @@ from agent_serving.serving.schemas.models import (
     SourceRef,
 )
 from agent_serving.serving.schemas.constants import (
+    ISSUE_LOW_CONFIDENCE,
+    ISSUE_NO_RESULT,
     KIND_RAW_SEGMENT,
     KIND_RETRIEVAL_UNIT,
     ROLE_CONTEXT,
     ROLE_SEED,
     ROLE_SUPPORT,
 )
+from agent_serving.serving.schemas.json_utils import safe_json_parse
 from agent_serving.serving.repositories.asset_repo import AssetRepository
 from agent_serving.serving.retrieval.graph_expander import (
     GraphExpander,
     parse_source_refs,
+    parse_target_ref,
 )
 
 logger = logging.getLogger(__name__)
@@ -61,14 +65,14 @@ class ContextAssembler:
         # 1. Build seed items from retrieval candidates
         seed_items = self._build_seed_items(candidates)
 
-        # 2. Source drill-down: parse source_refs_json for each seed
+        # 2. Source drill-down with 3-layer priority:
+        #    a) raw_segment_ids from source_refs_json
+        #    b) target_type/target_ref_json fallback
+        #    c) snapshot-level fallback (all segments in snapshot)
         all_source_segment_ids: list[str] = []
-        seed_to_sources: dict[str, list[str]] = {}
 
         for candidate in candidates:
-            source_refs = candidate.metadata.get("source_refs_json", "{}")
-            seg_ids = parse_source_refs(source_refs)
-            seed_to_sources[candidate.retrieval_unit_id] = seg_ids
+            seg_ids = self._resolve_candidate_sources(candidate)
             all_source_segment_ids.extend(seg_ids)
 
         # Deduplicate
@@ -79,9 +83,10 @@ class ContextAssembler:
                 seen_segs.add(sid)
                 unique_seg_ids.append(sid)
 
-        # 3. Fetch source segments
+        # 3. Fetch source segments (constrained to active build snapshots)
         source_segments = await self._repo.resolve_source_segments(
             json.dumps({"raw_segment_ids": unique_seg_ids}) if unique_seg_ids else None,
+            snapshot_ids=scope.snapshot_ids,
         )
         source_seg_map = {str(s["id"]): s for s in source_segments}
 
@@ -98,6 +103,7 @@ class ContextAssembler:
                 max_depth=plan.expansion.max_relation_depth,
                 relation_types=plan.expansion.relation_types or None,
                 max_results=plan.budget.max_expanded,
+                snapshot_ids=scope.snapshot_ids,
             )
 
             # Fetch expanded segment data
@@ -144,7 +150,9 @@ class ContextAssembler:
             if seg.get("document_id"):
                 document_ids.add(str(seg["document_id"]))
 
-        doc_sources = await self._repo.get_document_sources(list(document_ids))
+        doc_sources = await self._repo.get_document_sources(
+            list(document_ids), snapshot_ids=scope.snapshot_ids,
+        )
         sources = self._build_sources(doc_sources)
 
         # 7. Build issues
@@ -185,9 +193,36 @@ class ContextAssembler:
                 title=c.metadata.get("title"),
                 block_type=c.metadata.get("block_type", "unknown"),
                 semantic_role=c.metadata.get("semantic_role", "unknown"),
-                source_refs=_safe_json_parse(c.metadata.get("source_refs_json", "{}")),
+                source_refs=safe_json_parse(c.metadata.get("source_refs_json", "{}")),
             ))
         return items
+
+    def _resolve_candidate_sources(self, candidate: RetrievalCandidate) -> list[str]:
+        """Resolve source segment IDs with 3-layer priority.
+
+        Priority:
+        1. source_refs_json.raw_segment_ids (preferred)
+        2. target_type/target_ref_json (fallback for summary/entity_card units)
+        3. Returns empty list (snapshot-level fallback handled at assembly level)
+        """
+        # Layer 1: source_refs_json
+        source_refs = candidate.metadata.get("source_refs_json", "{}")
+        seg_ids = parse_source_refs(source_refs)
+        if seg_ids:
+            return seg_ids
+
+        # Layer 2: target_ref_json
+        target_type = candidate.metadata.get("target_type", "")
+        target_ref = candidate.metadata.get("target_ref_json", "{}")
+        if target_type and target_ref and target_ref != "{}":
+            seg_ids = parse_target_ref(target_ref)
+            if seg_ids:
+                return seg_ids
+
+        # Layer 3: No direct segment refs — returns empty
+        # (snapshot-level fallback would fetch all segments from snapshot,
+        # but is deferred until actual need arises)
+        return []
 
     def _build_source_items(
         self, segments: list[dict[str, Any]],
@@ -242,7 +277,7 @@ class ContextAssembler:
                 document_key=doc.get("document_key", ""),
                 title=doc.get("title"),
                 relative_path=doc.get("relative_path"),
-                scope_json=_safe_json_parse(doc.get("scope_json", "{}")),
+                scope_json=safe_json_parse(doc.get("scope_json", "{}")),
             ))
         return sources
 
@@ -251,12 +286,6 @@ class ContextAssembler:
         items: list[ContextItem],
         normalized: NormalizedQuery,
     ) -> list[Issue]:
-        from agent_serving.serving.schemas.constants import (
-            ISSUE_AMBIGUOUS_SCOPE,
-            ISSUE_NO_RESULT,
-            ISSUE_LOW_CONFIDENCE,
-        )
-
         issues: list[Issue] = []
 
         if not items:
@@ -277,9 +306,9 @@ class ContextAssembler:
     def _build_suggestions(self, issues: list[Issue]) -> list[str]:
         suggestions: list[str] = []
         for issue in issues:
-            if issue.type == "no_result":
+            if issue.type == ISSUE_NO_RESULT:
                 suggestions.append("尝试使用更通用的关键词")
-            elif issue.type == "low_confidence":
+            elif issue.type == ISSUE_LOW_CONFIDENCE:
                 suggestions.append("尝试更精确的描述或添加产品/版本约束")
         return suggestions
 
@@ -289,12 +318,3 @@ class ContextAssembler:
             parts.append(f"{e.type}={e.name}")
         parts.extend(normalized.keywords)
         return " ".join(parts)
-
-
-def _safe_json_parse(raw: str | dict) -> dict:
-    if isinstance(raw, dict):
-        return raw
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return {}

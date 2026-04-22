@@ -1,7 +1,7 @@
-"""FTS5 + BM25 retriever — v1.1 primary retrieval path.
+"""FTS5 + BM25 retriever — pure retrieval, no post-filtering.
 
-Uses application-layer jieba tokenization for Chinese text support.
-Falls back to raw LIKE query when jieba is unavailable.
+Post-filtering (role/block_type preference, truncation) is handled
+by the Reranker stage, not the retriever.
 """
 from __future__ import annotations
 
@@ -46,15 +46,18 @@ def _is_cjk(char: str) -> bool:
 
 
 def _escape_fts_query(text: str) -> str:
-    """Escape special FTS5 characters."""
-    # Remove FTS5 operators that could cause syntax errors
-    for ch in ('"', "'", "AND", "OR", "NOT", "NEAR"):
-        text = text.replace(ch, " ")
-    return text.strip()
+    """Escape FTS5 special characters by wrapping as phrase query."""
+    # Wrap in double-quotes to make it a phrase query,
+    # escaping any internal quotes by doubling them.
+    return '"' + text.replace('"', '""') + '"'
 
 
 class FTS5BM25Retriever(Retriever):
-    """FTS5 BM25 retrieval over asset_retrieval_units."""
+    """FTS5 BM25 retrieval over asset_retrieval_units.
+
+    Returns raw scored candidates; role/block_type preference
+    and budget truncation are handled by the Reranker stage.
+    """
 
     def __init__(self, db: aiosqlite.Connection) -> None:
         self._db = db
@@ -87,6 +90,8 @@ class FTS5BM25Retriever(Retriever):
                 ru.semantic_role,
                 ru.source_refs_json,
                 ru.facets_json,
+                ru.target_type,
+                ru.target_ref_json,
                 bm25(asset_retrieval_units_fts) AS fts_score
             FROM asset_retrieval_units_fts fts
             JOIN asset_retrieval_units ru ON ru.id = fts.rowid
@@ -104,27 +109,7 @@ class FTS5BM25Retriever(Retriever):
             logger.warning("FTS5 query failed, falling back to LIKE", exc_info=True)
             return await self._fallback_like(plan, snapshot_ids)
 
-        candidates = []
-        for row in rows:
-            r = dict(row)
-            # bm25 returns negative scores (more negative = more relevant)
-            score = -r.get("fts_score", 0.0)
-            candidates.append(RetrievalCandidate(
-                retrieval_unit_id=r["id"],
-                score=score,
-                source="fts_bm25",
-                metadata={
-                    "document_snapshot_id": r["document_snapshot_id"],
-                    "title": r.get("title"),
-                    "block_type": r.get("block_type", "unknown"),
-                    "semantic_role": r.get("semantic_role", "unknown"),
-                    "text": r.get("text", ""),
-                    "source_refs_json": r.get("source_refs_json", "{}"),
-                    "facets_json": r.get("facets_json", "{}"),
-                },
-            ))
-
-        return self._apply_post_filters(candidates, plan)
+        return self._rows_to_candidates(rows, source="fts_bm25")
 
     async def _fallback_like(
         self,
@@ -153,7 +138,9 @@ class FTS5BM25Retriever(Retriever):
                 ru.block_type,
                 ru.semantic_role,
                 ru.source_refs_json,
-                ru.facets_json
+                ru.facets_json,
+                ru.target_type,
+                ru.target_ref_json
             FROM asset_retrieval_units ru
             WHERE ({like_clauses})
               AND ru.document_snapshot_id IN ({placeholders})
@@ -172,55 +159,42 @@ class FTS5BM25Retriever(Retriever):
                 1 for kw in plan.keywords if kw.lower() in text
             )
             score = hit_count / max(len(plan.keywords), 1)
+            candidates.append(self._row_to_candidate(r, score, source="like_fallback"))
 
-            candidates.append(RetrievalCandidate(
-                retrieval_unit_id=r["id"],
-                score=score,
-                source="like_fallback",
-                metadata={
-                    "document_snapshot_id": r["document_snapshot_id"],
-                    "title": r.get("title"),
-                    "block_type": r.get("block_type", "unknown"),
-                    "semantic_role": r.get("semantic_role", "unknown"),
-                    "text": r.get("text", ""),
-                    "source_refs_json": r.get("source_refs_json", "{}"),
-                    "facets_json": r.get("facets_json", "{}"),
-                },
-            ))
+        return candidates
 
-        return self._apply_post_filters(candidates, plan)
-
-    def _apply_post_filters(
+    def _rows_to_candidates(
         self,
-        candidates: list[RetrievalCandidate],
-        plan: QueryPlan,
+        rows: list[Any],
+        source: str,
     ) -> list[RetrievalCandidate]:
-        """Apply Python-side filtering for facets, roles, block types."""
-        filtered = candidates
+        candidates = []
+        for row in rows:
+            r = dict(row)
+            # bm25 returns negative scores (more negative = more relevant)
+            score = -r.get("fts_score", 0.0)
+            candidates.append(self._row_to_candidate(r, score, source))
+        return candidates
 
-        # Filter by desired roles (prefer, don't exclude)
-        if plan.desired_roles:
-            preferred = [
-                c for c in filtered
-                if c.metadata.get("semantic_role") in plan.desired_roles
-            ]
-            other = [
-                c for c in filtered
-                if c.metadata.get("semantic_role") not in plan.desired_roles
-            ]
-            filtered = preferred + other
-
-        # Filter by desired block types (prefer, don't exclude)
-        if plan.desired_block_types:
-            preferred = [
-                c for c in filtered
-                if c.metadata.get("block_type") in plan.desired_block_types
-            ]
-            other = [
-                c for c in filtered
-                if c.metadata.get("block_type") not in plan.desired_block_types
-            ]
-            filtered = preferred + other
-
-        # Truncate to budget
-        return filtered[:plan.budget.max_items]
+    def _row_to_candidate(
+        self,
+        r: dict,
+        score: float,
+        source: str,
+    ) -> RetrievalCandidate:
+        return RetrievalCandidate(
+            retrieval_unit_id=r["id"],
+            score=score,
+            source=source,
+            metadata={
+                "document_snapshot_id": r["document_snapshot_id"],
+                "title": r.get("title"),
+                "block_type": r.get("block_type", "unknown"),
+                "semantic_role": r.get("semantic_role", "unknown"),
+                "text": r.get("text", ""),
+                "source_refs_json": r.get("source_refs_json", "{}"),
+                "facets_json": r.get("facets_json", "{}"),
+                "target_type": r.get("target_type", ""),
+                "target_ref_json": r.get("target_ref_json", "{}"),
+            },
+        )

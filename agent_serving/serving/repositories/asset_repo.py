@@ -13,6 +13,7 @@ from typing import Any
 import aiosqlite
 
 from agent_serving.serving.schemas.models import ActiveScope, QueryPlan
+from agent_serving.serving.schemas.json_utils import parse_source_refs
 
 logger = logging.getLogger(__name__)
 
@@ -52,24 +53,21 @@ class AssetRepository:
         release_row = await cursor.fetchone()
         build_id = release_row["build_id"]
 
-        # Get document snapshots for this build
+        # Get document snapshots for this build (only active selections)
         cursor = await self._db.execute(
-            "SELECT document_snapshot_id FROM asset_build_document_snapshots "
-            "WHERE build_id = ?",
+            "SELECT document_snapshot_id, document_id "
+            "FROM asset_build_document_snapshots "
+            "WHERE build_id = ? AND selection_status = 'active'",
             (build_id,),
         )
         snapshot_rows = await cursor.fetchall()
         snapshot_ids = [r["document_snapshot_id"] for r in snapshot_rows]
 
-        # Build document_snapshot_map: document_id → snapshot_id
-        cursor = await self._db.execute(
-            "SELECT bds.document_id, bds.document_snapshot_id "
-            "FROM asset_build_document_snapshots bds "
-            "WHERE bds.build_id = ?",
-            (build_id,),
-        )
-        map_rows = await cursor.fetchall()
-        document_snapshot_map = {r["document_id"]: r["document_snapshot_id"] for r in map_rows}
+        # Build document_snapshot_map: document_id → snapshot_id (active only)
+        document_snapshot_map = {
+            r["document_id"]: r["document_snapshot_id"]
+            for r in snapshot_rows
+        }
 
         return ActiveScope(
             release_id=release_id,
@@ -81,17 +79,27 @@ class AssetRepository:
     async def resolve_source_segments(
         self,
         source_refs_json: str | None,
+        snapshot_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Parse source_refs_json and fetch actual raw segments.
 
-        This is the v1.1 drill-down: parse source_refs_json to get
-        raw_segment_ids, then fetch full segment + document data.
+        Only returns segments belonging to the active build's snapshots.
+        snapshot_ids: active scope snapshot IDs to filter by.
         """
-        segment_ids = self._parse_segment_ids(source_refs_json)
+        segment_ids = parse_source_refs(source_refs_json)
         if not segment_ids:
             return []
 
         placeholders = ",".join("?" for _ in segment_ids)
+        params: list[str] = list(segment_ids)
+
+        # Constrain to active build snapshots if provided
+        snapshot_filter = ""
+        if snapshot_ids:
+            snap_ph = ",".join("?" for _ in snapshot_ids)
+            snapshot_filter = f" AND rs.document_snapshot_id IN ({snap_ph})"
+            params.extend(snapshot_ids)
+
         sql = f"""
             SELECT
                 rs.id,
@@ -111,8 +119,9 @@ class AssetRepository:
             LEFT JOIN asset_document_snapshot_links dsl ON ds.id = dsl.document_snapshot_id
             LEFT JOIN asset_documents d ON dsl.document_id = d.id
             WHERE rs.id IN ({placeholders})
+            {snapshot_filter}
         """
-        cursor = await self._db.execute(sql, segment_ids)
+        cursor = await self._db.execute(sql, params)
         return [dict(row) for row in await cursor.fetchall()]
 
     async def get_relations_for_segments(
@@ -150,12 +159,24 @@ class AssetRepository:
     async def get_document_sources(
         self,
         document_ids: list[str],
+        snapshot_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Fetch document metadata for source attribution."""
+        """Fetch document metadata for source attribution.
+
+        Only returns documents linked to the active build's snapshots.
+        """
         if not document_ids:
             return []
 
         placeholders = ",".join("?" for _ in document_ids)
+        params: list[str] = list(document_ids)
+
+        snapshot_filter = ""
+        if snapshot_ids:
+            snap_ph = ",".join("?" for _ in snapshot_ids)
+            snapshot_filter = f" AND dsl.document_snapshot_id IN ({snap_ph})"
+            params.extend(snapshot_ids)
+
         sql = f"""
             SELECT
                 d.id,
@@ -167,19 +188,7 @@ class AssetRepository:
             LEFT JOIN asset_document_snapshot_links dsl ON d.id = dsl.document_id
             LEFT JOIN asset_document_snapshots ds ON dsl.document_snapshot_id = ds.id
             WHERE d.id IN ({placeholders})
+            {snapshot_filter}
         """
-        cursor = await self._db.execute(sql, document_ids)
+        cursor = await self._db.execute(sql, params)
         return [dict(row) for row in await cursor.fetchall()]
-
-    @staticmethod
-    def _parse_segment_ids(source_refs_json: str | None) -> list[str]:
-        """Parse source_refs_json to extract raw_segment_ids."""
-        if not source_refs_json:
-            return []
-        try:
-            data = json.loads(source_refs_json)
-            if isinstance(data, dict):
-                return data.get("raw_segment_ids", [])
-            return []
-        except (json.JSONDecodeError, TypeError):
-            return []

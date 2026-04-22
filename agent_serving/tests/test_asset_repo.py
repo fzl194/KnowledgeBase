@@ -113,3 +113,55 @@ class TestGetDocumentSources:
     async def test_empty_ids(self, repo):
         sources = await repo.get_document_sources([])
         assert sources == []
+
+    @pytest.mark.asyncio
+    async def test_documents_filtered_by_snapshot(self, repo, seed_ids):
+        """Documents from non-active snapshots should be excluded."""
+        # Only UDG snapshot is active
+        sources = await repo.get_document_sources(
+            [seed_ids["doc_udg"], seed_ids["doc_unc"]],
+            snapshot_ids=[seed_ids["snap_udg"]],
+        )
+        # Should only return UDG document (matched snapshot)
+        assert all(s["document_key"] != "UNC_OM_REF" for s in sources)
+
+
+class TestBuildViewConsistency:
+    """Tests for selection_status and build scope isolation."""
+
+    @pytest.mark.asyncio
+    async def test_removed_selection_excluded_from_scope(self, db_connection):
+        """Set one build_document_snapshot to 'removed' and verify it's excluded."""
+        from agent_serving.tests.conftest import SNAP_UNC, BUILD_ID
+        await db_connection.execute(
+            "UPDATE asset_build_document_snapshots SET selection_status = 'removed' "
+            "WHERE document_snapshot_id = ? AND build_id = ?",
+            (SNAP_UNC, BUILD_ID),
+        )
+        await db_connection.commit()
+        repo = AssetRepository(db_connection)
+        scope = await repo.resolve_active_scope()
+
+        # UNC snapshot should be excluded
+        assert SNAP_UNC not in scope.snapshot_ids
+        assert SNAP_UNC not in scope.document_snapshot_map.values()
+        # Still has the other 2
+        assert len(scope.snapshot_ids) == 2
+
+    @pytest.mark.asyncio
+    async def test_source_segments_filtered_by_snapshot(self, repo, seed_ids):
+        """resolve_source_segments should only return segments in active snapshots."""
+        source_refs = json.dumps({"raw_segment_ids": [seed_ids["rs_add_apn_udg"]]})
+        # Passing only UDG snapshot — should find the segment
+        segments = await repo.resolve_source_segments(
+            source_refs,
+            snapshot_ids=[seed_ids["snap_udg"]],
+        )
+        assert len(segments) == 1
+
+        # Passing only UNC snapshot — should NOT find the UDG segment
+        segments = await repo.resolve_source_segments(
+            source_refs,
+            snapshot_ids=[seed_ids["snap_unc"]],
+        )
+        assert len(segments) == 0

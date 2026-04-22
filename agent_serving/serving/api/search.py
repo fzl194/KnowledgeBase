@@ -1,18 +1,16 @@
 """Search API — v1.1 /search endpoint.
 
 Single endpoint: /api/v1/search
-Pipeline: normalize → plan → resolve scope → retrieve → expand → assemble
+Pipeline: normalize → plan → resolve scope → retrieve → fuse → rerank → assemble
+
+Each stage is pluggable through dependency injection.
 """
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from agent_serving.serving.schemas.models import (
-    ActiveScope,
     ContextPack,
-    QueryPlan,
-    RetrievalBudget,
-    ExpansionConfig,
     SearchRequest,
 )
 from agent_serving.serving.repositories.asset_repo import AssetRepository
@@ -20,6 +18,10 @@ from agent_serving.serving.retrieval.bm25_retriever import FTS5BM25Retriever
 from agent_serving.serving.retrieval.graph_expander import GraphExpander
 from agent_serving.serving.application.normalizer import QueryNormalizer
 from agent_serving.serving.application.assembler import ContextAssembler
+from agent_serving.serving.pipeline.retriever_manager import RetrieverManager
+from agent_serving.serving.pipeline.fusion import IdentityFusion, RRFFusion
+from agent_serving.serving.pipeline.reranker import ScoreReranker
+from agent_serving.serving.pipeline.query_planner import QueryPlanner, RulePlannerProvider
 
 router = APIRouter(prefix="/api/v1", tags=["search"])
 
@@ -28,55 +30,52 @@ def _get_repo(request: Request) -> AssetRepository:
     return AssetRepository(request.app.state.db)
 
 
-def _get_retriever(request: Request) -> FTS5BM25Retriever:
-    return FTS5BM25Retriever(request.app.state.db)
+def _get_retriever_manager(request: Request) -> RetrieverManager:
+    bm25 = FTS5BM25Retriever(request.app.state.db)
+    mgr = RetrieverManager({"fts_bm25": bm25})
+    # Future: register vector retriever here
+    return mgr
 
 
 def _get_expander(request: Request) -> GraphExpander:
     return GraphExpander(request.app.state.db)
 
 
-def _build_plan(request: SearchRequest, normalized) -> QueryPlan:
-    """Build QueryPlan from request + normalized query."""
-    scope = normalized.scope
-    if request.scope:
-        scope = request.scope
+def _get_planner() -> QueryPlanner:
+    return QueryPlanner(RulePlannerProvider())
 
-    entities = normalized.entities
-    if request.entities:
-        entities = request.entities
 
-    return QueryPlan(
-        intent=normalized.intent,
-        keywords=normalized.keywords,
-        entity_constraints=entities,
-        scope_constraints=scope,
-        desired_roles=normalized.desired_roles,
-        desired_block_types=[],
-        budget=RetrievalBudget(),
-        expansion=ExpansionConfig(),
-    )
+def _get_reranker() -> ScoreReranker:
+    return ScoreReranker()
 
 
 @router.post("/search", response_model=ContextPack)
 async def search(
-    request: SearchRequest,
+    body: SearchRequest,
     repo: AssetRepository = Depends(_get_repo),
-    retriever: FTS5BM25Retriever = Depends(_get_retriever),
+    retriever_mgr: RetrieverManager = Depends(_get_retriever_manager),
     expander: GraphExpander = Depends(_get_expander),
+    planner: QueryPlanner = Depends(_get_planner),
+    reranker: ScoreReranker = Depends(_get_reranker),
 ) -> ContextPack:
+    # 1. Normalize query
     normalizer = QueryNormalizer()
-    normalized = normalizer.normalize(request.query)
+    normalized = normalizer.normalize(body.query)
 
     # Merge explicit overrides
-    if request.scope:
-        normalized = normalized.model_copy(update={"scope": request.scope})
-    if request.entities:
-        normalized = normalized.model_copy(update={"entities": request.entities})
+    if body.scope:
+        normalized = normalized.model_copy(update={"scope": body.scope})
+    if body.entities:
+        normalized = normalized.model_copy(update={"entities": body.entities})
 
-    plan = _build_plan(request, normalized)
+    # 2. Build plan via pluggable planner
+    plan = planner.plan(
+        normalized,
+        scope_override=body.scope,
+        entities_override=body.entities,
+    )
 
-    # Resolve active scope (release → build → snapshots)
+    # 3. Resolve active scope (release → build → snapshots)
     try:
         scope = await repo.resolve_active_scope()
     except ValueError as e:
@@ -92,25 +91,36 @@ async def search(
             )
         raise
 
-    # Retrieve candidates via FTS5
-    candidates = await retriever.retrieve(plan, scope.snapshot_ids)
+    # 4. Retrieve from all configured paths
+    raw_candidates = await retriever_mgr.retrieve(plan, scope.snapshot_ids)
 
-    # Assemble ContextPack
+    # 5. Fuse (combine multi-path results)
+    fusion = IdentityFusion()
+    if plan.retriever_config.fusion_method == "rrf":
+        fusion = RRFFusion(k=plan.retriever_config.rrf_k)
+    fused = await fusion.fuse(raw_candidates, plan)
+
+    # 6. Rerank
+    ranked = await reranker.rerank(fused, plan)
+
+    # 7. Assemble ContextPack
     assembler = ContextAssembler(repo, expander)
     pack = await assembler.assemble(
-        query=request.query,
+        query=body.query,
         normalized=normalized,
         plan=plan,
         scope=scope,
-        candidates=candidates,
+        candidates=ranked,
     )
 
-    if request.debug:
+    if body.debug:
         pack = pack.model_copy(update={
             "debug": {
                 "plan": plan.model_dump(),
                 "scope": scope.model_dump(),
-                "candidate_count": len(candidates),
+                "candidate_count": len(ranked),
+                "retriever_config": plan.retriever_config.model_dump(),
+                "fusion_method": plan.retriever_config.fusion_method,
             },
         })
 
