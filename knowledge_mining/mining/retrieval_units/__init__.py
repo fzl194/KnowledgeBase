@@ -29,6 +29,10 @@ class QuestionGenerator(Protocol):
         """Return list of generated questions for the segment."""
         ...
 
+    def generate_batch(self, segments: list[RawSegmentData]) -> dict[str, list[str]]:
+        """Return {segment_key: [questions]} for all segments. Default: call generate per segment."""
+        ...
+
 
 class NoOpQuestionGenerator:
     """Default: no questions generated (LLM not connected)."""
@@ -36,12 +40,15 @@ class NoOpQuestionGenerator:
     def generate(self, segment: RawSegmentData) -> list[str]:
         return []
 
+    def generate_batch(self, segments: list[RawSegmentData]) -> dict[str, list[str]]:
+        return {}
+
 
 class LlmQuestionGenerator:
     """v1.2: LLM-backed question generation via llm_service HTTP API.
 
-    Uses submit+poll pattern. Failures return empty list (non-blocking).
-    Field names match llm_service/client.py exactly.
+    Batch async: submit_all → poll_all → return results.
+    Worker concurrency handles parallelism on the server side.
     """
 
     def __init__(self, base_url: str = "http://localhost:8900", timeout: int = 120) -> None:
@@ -50,6 +57,7 @@ class LlmQuestionGenerator:
         self._timeout = timeout
 
     def generate(self, segment: RawSegmentData) -> list[str]:
+        """Single segment submit+poll (fallback, not recommended for batch)."""
         try:
             task_id = self._client.submit_task(
                 template_key="mining-question-gen",
@@ -69,6 +77,46 @@ class LlmQuestionGenerator:
             return [item["question"] for item in items if "question" in item]
         except Exception:
             return []
+
+    def generate_batch(self, segments: list[RawSegmentData]) -> dict[str, list[str]]:
+        """Batch: submit all tasks, then poll all results.
+
+        Returns {segment_key: [question_strings]}.
+        Failed/empty results are omitted from the dict.
+        """
+        if not segments:
+            return {}
+
+        # Phase 1: Submit all tasks
+        seg_tasks: dict[str, str] = {}  # segment_key -> task_id
+        for seg in segments:
+            seg_key = f"{seg.document_key}#{seg.segment_index}"
+            task_id = self._client.submit_task(
+                template_key="mining-question-gen",
+                input={
+                    "title": seg.section_title or "",
+                    "content": seg.raw_text,
+                },
+                caller_domain="mining",
+                pipeline_stage="retrieval_units",
+                expected_output_type="json_array",
+            )
+            if task_id:
+                seg_tasks[seg_key] = task_id
+
+        if not seg_tasks:
+            return {}
+
+        # Phase 2: Poll all results
+        results: dict[str, list[str]] = {}
+        for seg_key, task_id in seg_tasks.items():
+            items = self._client.poll_result(task_id, timeout=self._timeout)
+            if items:
+                questions = [item["question"] for item in items if "question" in item]
+                if questions:
+                    results[seg_key] = questions
+
+        return results
 
 
 def build_retrieval_units(
@@ -93,6 +141,12 @@ def build_retrieval_units(
     units: list[RetrievalUnitData] = []
     seen_entity_cards: set[str] = set()
 
+    # Phase 1: Batch-generate all questions (submit all → poll all)
+    question_map: dict[str, list[str]] = {}
+    if qgen is not None:
+        question_map = qgen.generate_batch(segments)
+
+    # Phase 2: Build units for each segment
     for seg in segments:
         seg_key = f"{seg.document_key}#{seg.segment_index}"
         source_seg_id = (seg_ids or {}).get(seg_key)
@@ -112,8 +166,8 @@ def build_retrieval_units(
                 seen_entity_cards.add(entity_key)
                 units.append(_make_entity_card_unit(seg, ref, source_seg_id))
 
-        # 4. generated_question units
-        questions = qgen.generate(seg)
+        # 4. generated_question units (from batch results)
+        questions = question_map.get(seg_key, [])
         for qi, question in enumerate(questions):
             units.append(_make_generated_question_unit(seg, question, qi, source_seg_id))
 
