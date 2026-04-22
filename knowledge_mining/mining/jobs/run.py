@@ -12,10 +12,13 @@ Global stages:
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from knowledge_mining.mining.db import AssetCoreDB, MiningRuntimeDB
 from knowledge_mining.mining.models import (
@@ -47,6 +50,7 @@ def run(
     batch_params: BatchParams | None = None,
     phase1_only: bool = False,
     publish_on_partial_failure: bool = False,
+    llm_base_url: str | None = None,
 ) -> dict[str, Any]:
     """Execute the mining pipeline.
 
@@ -58,6 +62,7 @@ def run(
         phase1_only: If True, stop after document-level processing (no build/publish)
         publish_on_partial_failure: If True, publish even when some docs failed.
             Default False: partial failures block active release, run marked "completed_with_errors".
+        llm_base_url: LLM service URL (e.g. "http://localhost:8900"). None = no LLM.
 
     Returns:
         Summary dict with run_id, counts, and status.
@@ -75,10 +80,13 @@ def run(
     # Pre-generate run_id so we can fail_run on global exception
     run_id = uuid.uuid4().hex
 
+    # LLM integration: create question generator if URL provided
+    question_generator = _init_llm(llm_base_url)
+
     try:
         return _run_pipeline(
             asset_db, runtime_db, input_path, params, phase1_only, run_id,
-            publish_on_partial_failure,
+            publish_on_partial_failure, question_generator,
         )
     except Exception as e:
         # Mark run as failed
@@ -138,6 +146,31 @@ def publish(
 # Internal pipeline implementation
 # ===================================================================
 
+def _init_llm(llm_base_url: str | None) -> Any:
+    """Initialize LLM question generator if URL provided.
+
+    Registers template if llm_service is reachable.
+    Returns None if no URL or service unreachable.
+    """
+    if not llm_base_url:
+        return None
+
+    from knowledge_mining.mining.llm_client import LlmClient
+    from knowledge_mining.mining.llm_templates import TEMPLATES
+    from knowledge_mining.mining.retrieval_units import LlmQuestionGenerator
+
+    client = LlmClient(base_url=llm_base_url)
+    if not client.health_check():
+        logger.warning("LLM service at %s unreachable, proceeding without LLM", llm_base_url)
+        return None
+
+    # Register templates (idempotent)
+    for tpl in TEMPLATES:
+        client.register_template(tpl)
+
+    return LlmQuestionGenerator(base_url=llm_base_url)
+
+
 def _run_pipeline(
     asset_db: AssetCoreDB,
     runtime_db: MiningRuntimeDB,
@@ -146,6 +179,7 @@ def _run_pipeline(
     phase1_only: bool,
     run_id: str,
     publish_on_partial_failure: bool = False,
+    question_generator: Any = None,
 ) -> dict[str, Any]:
     """Core pipeline logic. Assumes DBs are already open."""
     tracker = RuntimeTracker(runtime_db)
@@ -279,6 +313,7 @@ def _run_pipeline(
             evt = tracker.start_stage(run_id, "build_retrieval_units", rd_id)
             retrieval_units = build_retrieval_units(
                 segments, seg_ids=seg_id_map, document_key=doc_key,
+                question_generator=question_generator,
             )
             tracker.end_stage(evt, run_id, "build_retrieval_units", output_summary=f"{len(retrieval_units)} units")
             runtime_db.commit()

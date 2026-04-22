@@ -41,9 +41,10 @@ class LlmQuestionGenerator:
     """v1.2: LLM-backed question generation via llm_service HTTP API.
 
     Uses submit+poll pattern. Failures return empty list (non-blocking).
+    Field names match llm_service/client.py exactly.
     """
 
-    def __init__(self, base_url: str = "http://localhost:8000", timeout: int = 30) -> None:
+    def __init__(self, base_url: str = "http://localhost:8900", timeout: int = 120) -> None:
         from knowledge_mining.mining.llm_client import LlmClient
         self._client = LlmClient(base_url=base_url)
         self._timeout = timeout
@@ -52,20 +53,19 @@ class LlmQuestionGenerator:
         try:
             task_id = self._client.submit_task(
                 template_key="mining-question-gen",
-                variables={
+                input={
                     "title": segment.section_title or "",
                     "content": segment.raw_text,
                 },
                 caller_domain="mining",
                 pipeline_stage="retrieval_units",
+                expected_output_type="json_array",
             )
             if task_id is None:
                 return []
-            result_text = self._client.poll_result(task_id, timeout=self._timeout)
-            if result_text is None:
+            items = self._client.poll_result(task_id, timeout=self._timeout)
+            if items is None:
                 return []
-            import json
-            items = json.loads(result_text)
             return [item["question"] for item in items if "question" in item]
         except Exception:
             return []
