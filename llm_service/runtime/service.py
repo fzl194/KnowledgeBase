@@ -213,14 +213,31 @@ class LLMService:
         actual_expected_type = resolved["expected_output_type"] or "json_object"
         actual_schema = resolved["output_schema"]
 
-        # Directly set to running and execute (sync path, no queue)
+        # Atomically claim: only succeed if task is still 'queued' (not grabbed by Worker)
         now_iso = datetime.now(timezone.utc).isoformat()
         lease_dt = datetime.now(timezone.utc) + timedelta(seconds=self._config.lease_duration)
-        await self._db.execute(
-            "UPDATE agent_llm_tasks SET status = 'running', started_at = ?, lease_expires_at = ?, updated_at = ? WHERE id = ?",
+        cur = await self._db.execute(
+            """UPDATE agent_llm_tasks
+               SET status = 'running', started_at = ?, lease_expires_at = ?, updated_at = ?
+               WHERE id = ? AND status = 'queued'
+               RETURNING id""",
             (now_iso, lease_dt.isoformat(), now_iso, task_id),
         )
+        claimed = await cur.fetchone()
         await self._db.commit()
+
+        if not claimed:
+            # Worker already claimed this task — poll until it finishes
+            logger.info("Task %s already claimed by worker, polling for result", task_id[:8])
+            effective_timeout = timeout or self._config.execute_timeout
+            deadline = asyncio.get_event_loop().time() + effective_timeout
+            while asyncio.get_event_loop().time() < deadline:
+                await asyncio.sleep(0.5)
+                cur = await self._db.execute("SELECT status FROM agent_llm_tasks WHERE id = ?", (task_id,))
+                t = await cur.fetchone()
+                if t and t["status"] in ("succeeded", "dead_letter", "cancelled"):
+                    return await self._build_execute_response(task_id)
+            return await self._build_execute_response(task_id)
 
         effective_timeout = timeout or self._config.execute_timeout
         try:
