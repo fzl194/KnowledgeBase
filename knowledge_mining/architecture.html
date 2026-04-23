@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mining Pipeline 架构</title>
+<style>
+:root{--bg:#f6f4f0;--srf:#fff;--srf2:#faf9f7;--code:#f0eeea;--hi:#e8f4f8;--acc:#eef2ff;--wrn:#fef3c7;--ok:#ecfdf5;--t1:#1a1a2e;--t2:#4a4a6a;--t3:#7c7c9a;--ti:#fff;--cb:#2563eb;--ct:#0d9488;--cv:#7c3aed;--ca:#b45309;--cr:#be123c;--ce:#059669;--co:#c2410c;--cs:#475569;--bd:#e5e2dc;--fm:'Cascadia Code','JetBrains Mono',monospace;--fb:'Segoe UI','Noto Sans SC',system-ui,sans-serif;--fd:'Georgia','Noto Serif SC',serif;--r:8px;--rl:12px;--mw:1100px}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}html{scroll-behavior:smooth;font-size:15px}body{font-family:var(--fb);background:var(--bg);color:var(--t1);line-height:1.7}
+nav{position:sticky;top:0;z-index:100;background:rgba(246,244,240,.92);backdrop-filter:blur(12px);border-bottom:1px solid var(--bd);padding:8px 0}
+nav .ni{max-width:var(--mw);margin:0 auto;padding:0 24px;display:flex;align-items:center;gap:16px;overflow-x:auto;white-space:nowrap}
+.nb{font-family:var(--fm);font-size:.82rem;font-weight:700;color:var(--cb);flex-shrink:0}
+.nl{display:flex;gap:10px;list-style:none}
+.nl a{font-size:.8rem;color:var(--t3);text-decoration:none;padding:4px 8px;border-radius:var(--r);transition:color .2s,background .2s}
+.nl a:hover{color:var(--cb);background:var(--acc)}
+.pc{max-width:var(--mw);margin:0 auto;padding:0 24px}
+.hero{padding:48px 0 36px;border-bottom:2px solid var(--bd)}.hero h1{font-family:var(--fd);font-size:1.8rem;font-weight:700;margin-bottom:8px}.hero .sub{font-size:.95rem;color:var(--t2);max-width:680px}
+.vb{display:inline-block;background:var(--cb);color:var(--ti);font-family:var(--fm);font-size:.72rem;font-weight:600;padding:2px 10px;border-radius:20px;margin-bottom:8px}
+.sec{padding:44px 0;border-bottom:1px solid var(--bd)}.sh h2{font-family:var(--fd);font-size:1.4rem;font-weight:700;margin-bottom:6px}.sh .sn{font-family:var(--fm);font-size:.78rem;color:var(--cb);font-weight:600;display:block;margin-bottom:4px;letter-spacing:1px}.sh p{font-size:.9rem;color:var(--t2);max-width:760px}
+.tw{overflow-x:auto;margin:16px 0;border-radius:var(--rl);border:1px solid var(--bd);background:var(--srf)}
+table{width:100%;border-collapse:collapse;font-size:.86rem}th{background:var(--srf2);font-weight:600;text-align:left;padding:9px 12px;border-bottom:2px solid var(--bd);color:var(--t2);font-size:.8rem;text-transform:uppercase;letter-spacing:.5px}td{padding:9px 12px;border-bottom:1px solid var(--bd);vertical-align:top}tr:last-child td{border-bottom:none}tr:hover td{background:var(--srf2)}
+.b{display:inline-block;font-size:.7rem;font-weight:600;padding:2px 7px;border-radius:4px}.bb{background:#dbeafe;color:#1e40af}.bt{background:#ccfbf1;color:#0f766e}.ba{background:#fef3c7;color:#92400e}.bv{background:#ede9fe;color:#5b21b6}.be{background:#d1fae5;color:#065f46}.br{background:#ffe4e6;color:#9f1239}.bo{background:#ffedd5;color:#9a3412}
+.dia{background:#f8fafc;border:1px solid var(--bd);border-radius:var(--rl);padding:24px;margin:16px 0;overflow-x:auto}.dia-t{font-size:.8rem;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px}
+.fb{background:var(--srf);border:1.5px solid #d4d0c8;border-radius:var(--r);padding:9px 13px;text-align:center;min-width:90px;flex-shrink:0}.fb.p{border-color:var(--cb);background:#eff6ff}.fb .fl{font-size:.7rem;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.5px}.fb .fv{font-size:.82rem;font-weight:600;margin-top:2px}
+.fa{display:flex;align-items:center;padding:0 3px;color:var(--t3);font-size:1rem;flex-shrink:0}
+.co{border-left:3px solid var(--cb);background:var(--acc);padding:12px 18px;border-radius:0 var(--r) var(--r) 0;margin:16px 0;font-size:.88rem;color:var(--t2)}.co strong{color:var(--t1)}
+.card{background:var(--srf);border:1px solid var(--bd);border-radius:var(--rl);padding:18px;box-shadow:0 1px 3px rgba(0,0,0,.06)}.cg{display:grid;gap:14px}.cg2{grid-template-columns:repeat(2,1fr)}.cg3{grid-template-columns:repeat(3,1fr)}@media(max-width:800px){.cg2,.cg3{grid-template-columns:1fr}}.card h3{font-size:.95rem;font-weight:600;margin-bottom:6px}
+code{font-family:var(--fm);font-size:.84em;background:var(--code);padding:2px 5px;border-radius:4px;color:#4338ca}pre{background:var(--code);border:1px solid var(--bd);border-radius:var(--r);padding:12px;overflow-x:auto;font-family:var(--fm);font-size:.8rem;line-height:1.6;margin:10px 0}
+.mets{display:flex;gap:24px;flex-wrap:wrap;margin:16px 0}.met{text-align:center}.met-v{font-family:var(--fd);font-size:1.8rem;font-weight:700;line-height:1}.met-l{font-size:.76rem;color:var(--t3);margin-top:3px}
+footer{padding:36px 0;text-align:center;color:var(--t3);font-size:.8rem}
+</style>
+</head>
+<body>
+<nav><div class="ni"><span class="nb">Mining Pipeline</span><ul class="nl"><li><a href="#arch">模块架构</a></li><li><a href="#pipeline">九阶段 Pipeline</a></li><li><a href="#db">双库设计</a></li><li><a href="#snapshot">共享快照</a></li><li><a href="#enrich">增强策略</a></li><li><a href="#llm">LLM 集成</a></li><li><a href="#design">设计决策</a></li><li><a href="#v12">v1.2 演进</a></li></ul></div></nav>
+<div class="pc">
+<section class="hero"><span class="vb">v1.1 PRODUCTION</span><h1>Knowledge Mining Pipeline 架构</h1><p class="sub">离线知识挖掘引擎。将原始文档文件夹经 9 阶段 Pipeline 转化为结构化知识资产（asset_core.sqlite），供 Serving 在线检索。两阶段执行：文档级并行处理 + 全局串行发布。</p></section>
+
+<!-- S1: 模块架构 -->
+<section class="sec" id="arch"><div class="sh"><span class="sn">01</span><h2>模块架构</h2></div>
+<div class="dia"><div class="dia-t">目录结构与职责</div>
+<div style="display:flex;flex-direction:column;gap:8px">
+<div style="display:flex;align-items:center;gap:6px"><div style="width:90px;text-align:right;font-size:.76rem;font-weight:600;color:var(--cb)">输入层</div><div style="flex:1;display:flex;gap:6px"><div class="fb" style="flex:1;border-color:var(--cb);background:#eff6ff"><div class="fl">INGESTION</div><div class="fv">递归扫描文件</div></div><div class="fb" style="flex:1;border-color:var(--cb);background:#eff6ff"><div class="fl">PARSERS</div><div class="fv">MD/TXT/HTML 解析</div></div><div class="fb" style="flex:1;border-color:var(--cb);background:#eff6ff"><div class="fl">STRUCTURE</div><div class="fv">SectionNode 树</div></div></div></div>
+<div style="display:flex;align-items:center;gap:6px"><div style="width:90px;text-align:right;font-size:.76rem;font-weight:600;color:var(--cb)">处理层</div><div style="flex:1;display:flex;gap:6px"><div class="fb p"><div class="fl">SEGMENTATION</div><div class="fv">结构化分块</div></div><div class="fb p"><div class="fl">ENRICH</div><div class="fv">规则增强</div></div><div class="fb p"><div class="fl">RELATIONS</div><div class="fv">关系构建</div></div><div class="fb p"><div class="fl">RETRIEVAL UNITS</div><div class="fv">检索单元</div></div></div></div>
+<div style="display:flex;align-items:center;gap:6px"><div style="width:90px;text-align:right;font-size:.76rem;font-weight:600;color:var(--ce)">发布层</div><div style="flex:1;display:flex;gap:6px"><div class="fb" style="flex:1;border-color:var(--ce);background:#ecfdf5"><div class="fl">SNAPSHOT</div><div class="fv">共享快照</div></div><div class="fb" style="flex:1;border-color:var(--ce);background:#ecfdf5"><div class="fl">PUBLISHING</div><div class="fv">Build + Release</div></div></div></div>
+<div style="display:flex;align-items:center;gap:6px"><div style="width:90px;text-align:right;font-size:.76rem;font-weight:600;color:var(--t3)">支撑</div><div style="flex:1;display:flex;gap:6px"><div class="fb" style="flex:1;border-color:var(--cs);background:#f1f5f9"><div class="fl">MODELS</div><div class="fv">12 个 frozen dataclass</div></div><div class="fb" style="flex:1;border-color:var(--cs);background:#f1f5f9"><div class="fl">DB</div><div class="fv">双库适配器</div></div><div class="fb" style="flex:1;border-color:var(--cs);background:#f1f5f9"><div class="fl">RUNTIME</div><div class="fv">断点续跑</div></div></div></div>
+</div></div>
+
+<div class="tw"><table><thead><tr><th>模块</th><th>目录</th><th>职责</th></tr></thead><tbody>
+<tr><td>数据模型</td><td><code>models.py</code></td><td>12 个 frozen dataclass + 11 个 frozenset 常量，对齐 SQL schema</td></tr>
+<tr><td>数据库适配</td><td><code>db.py</code></td><td>AssetCoreDB + MiningRuntimeDB 双库。DDL 从共享 SQL 加载</td></tr>
+<tr><td>摄取</td><td><code>ingestion/</code></td><td>递归扫描 .md/.txt/.html/.pdf/.docx，计算双重 hash</td></tr>
+<tr><td>解析器</td><td><code>parsers/</code></td><td>工厂模式：MarkdownParser / PlainTextParser / PassthroughParser</td></tr>
+<tr><td>结构化</td><td><code>structure/</code></td><td>markdown-it → SectionNode 树（保留 table/list/code 结构）</td></tr>
+<tr><td>分块</td><td><code>segmentation/</code></td><td>Heading 独立成段。9 种 block_type + 11 种 semantic_role</td></tr>
+<tr><td>增强</td><td><code>enrich/</code></td><td>规则增强：entity_refs、heading_role、table metadata</td></tr>
+<tr><td>关系构建</td><td><code>relations/</code></td><td>结构关系：previous/next、same_section、section_header_of</td></tr>
+<tr><td>检索单元</td><td><code>retrieval_units/</code></td><td>raw_text + contextual_text + entity_card + question_gen</td></tr>
+<tr><td>快照</td><td><code>snapshot/</code></td><td>三层选择：document / snapshot / link。SHA256 去重</td></tr>
+<tr><td>发布</td><td><code>publishing/</code></td><td>增量构建（full/incremental）+ 版本发布（staging/active/retired）</td></tr>
+<tr><td>Pipeline 编排</td><td><code>jobs/run.py</code></td><td>run() + publish() 两个入口。编排 9 阶段执行</td></tr>
+<tr><td>LLM 客户端</td><td><code>llm_client.py</code></td><td>调用 LLM Service 的 HTTP 客户端。不可用时降级 NoOp</td></tr>
+</tbody></table></div>
+</section>
+
+<!-- S2: 九阶段 Pipeline -->
+<section class="sec" id="pipeline"><div class="sh"><span class="sn">02</span><h2>九阶段 Pipeline</h2><p>Phase 1 文档级（每文档独立，可并行）+ Phase 2 全局操作（串行执行）。</p></div>
+
+<div class="dia"><div class="dia-t">Phase 1: 文档级并行处理</div>
+<div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+<div class="fb" style="border-color:var(--cb);background:#eff6ff"><div class="fl">S1</div><div class="fv">Ingest</div></div><div class="fa">→</div>
+<div class="fb" style="border-color:var(--cb);background:#eff6ff"><div class="fl">S2</div><div class="fv">Parse</div></div><div class="fa">→</div>
+<div class="fb" style="border-color:var(--cb);background:#eff6ff"><div class="fl">S3</div><div class="fv">Segment</div></div><div class="fa">→</div>
+<div class="fb" style="border-color:var(--cv);background:#f5f3ff"><div class="fl">S4</div><div class="fv">Enrich</div></div><div class="fa">→</div>
+<div class="fb" style="border-color:var(--cv);background:#f5f3ff"><div class="fl">S5</div><div class="fv">Relations</div></div><div class="fa">→</div>
+<div class="fb" style="border-color:var(--cv);background:#f5f3ff"><div class="fl">S6</div><div class="fv">Retrieval Units</div></div><div class="fa">→</div>
+<div class="fb" style="border-color:var(--ce);background:#ecfdf5"><div class="fl">S7</div><div class="fv">Snapshot</div></div>
+</div></div>
+
+<div class="dia"><div class="dia-t">Phase 2: 全局串行发布</div>
+<div style="display:flex;align-items:center;gap:4px">
+<div class="fb" style="border-color:var(--co);background:#ffedd5"><div class="fl">S8</div><div class="fv">Assemble Build</div></div><div class="fa">→</div>
+<div class="fb" style="border-color:var(--co);background:#ffedd5"><div class="fl">S9</div><div class="fv">Publish Release</div></div>
+</div></div>
+
+<div class="tw"><table><thead><tr><th>阶段</th><th>输入</th><th>输出</th><th>核心逻辑</th></tr></thead><tbody>
+<tr><td><span class="b bb">S1</span> Ingest</td><td>文件夹路径</td><td><code>list[RawFileData]</code></td><td>递归扫描；计算 raw_content_hash + normalized_content_hash；跳过未变文件</td></tr>
+<tr><td><span class="b bb">S2</span> Parse</td><td>RawFileData.content</td><td>SectionNode 树</td><td>MarkdownParser：markdown-it-py 解析，保留 table/list/code 结构</td></tr>
+<tr><td><span class="b bb">S3</span> Segment</td><td>SectionNode + DocumentProfile</td><td><code>list[RawSegmentData]</code></td><td>Heading 独立成段；9 种 block_type + 11 种 semantic_role；生成 content_hash</td></tr>
+<tr><td><span class="b bv">S4</span> Enrich</td><td>Segments</td><td>增强后 Segments</td><td>正则提取实体 + 语义角色分类 + 表格元数据；v1.2: LLM 替换规则引擎</td></tr>
+<tr><td><span class="b bv">S5</span> Relations</td><td>Segments + ID 映射</td><td><code>list[SegmentRelationData]</code></td><td>结构关系：previous/next, same_section, section_header_of；带 weight/confidence/distance</td></tr>
+<tr><td><span class="b bv">S6</span> Retrieval Units</td><td>Segments + 可选 LLM</td><td><code>list[RetrievalUnitData]</code></td><td>4 种载体：raw_text, contextual_text, entity_card, generated_question</td></tr>
+<tr><td><span class="b be">S7</span> Snapshot</td><td>文档内容/配置</td><td>(doc_id, snapshot_id, link_id)</td><td>三层模型：document → snapshot → link；保守归一化 + SHA256 去重</td></tr>
+<tr><td><span class="b bo">S8</span> Build</td><td>Snapshot 决策列表</td><td>build_id</td><td>自动判断 full/incremental；文档分类 NEW/UPDATE/SKIP/REMOVE</td></tr>
+<tr><td><span class="b bo">S9</span> Release</td><td>build_id</td><td>release_id</td><td>激活新 release → 旧 release 退役；同一 channel 唯一 active</td></tr>
+</tbody></table></div>
+</section>
+
+<!-- S3: 双库设计 -->
+<section class="sec" id="db"><div class="sh"><span class="sn">03</span><h2>双库设计</h2></div>
+<div class="mets"><div class="met"><div class="met-v" style="color:var(--cb)">11</div><div class="met-l">asset_core 表</div></div><div class="met"><div class="met-v" style="color:var(--cv)">3</div><div class="met-l">mining_runtime 表</div></div><div class="met"><div class="met-v" style="color:var(--ce)">30</div><div class="met-l">测试用例</div></div></div>
+
+<div class="cg cg2">
+<div class="card" style="border-left:3px solid var(--cb)"><h3 style="color:var(--cb)">asset_core — 知识资产库</h3><p style="font-size:.86rem;color:var(--t2)">Mining 写入，Serving 只读。CQRS 读写分离的写入端。</p>
+<div class="tw" style="margin-top:8px"><table><thead><tr><th>分组</th><th>表</th></tr></thead><tbody>
+<tr><td rowspan="4" style="font-weight:600">文档层</td><td><code>asset_source_batches</code></td></tr>
+<tr><td><code>asset_documents</code></td></tr>
+<tr><td><code>asset_document_snapshots</code></td></tr>
+<tr><td><code>asset_document_snapshot_links</code></td></tr>
+<tr><td rowspan="3" style="font-weight:600">内容层</td><td><code>asset_raw_segments</code>（9 block_type + 11 semantic_role）</td></tr>
+<tr><td><code>asset_raw_segment_relations</code>（4 structural + 5 discourse）</td></tr>
+<tr><td><code>asset_retrieval_units</code>（4 unit_type）</td></tr>
+<tr><td rowspan="4" style="font-weight:600">控制层</td><td><code>asset_retrieval_embeddings</code></td></tr>
+<tr><td><code>asset_builds</code>（5 status）</td></tr>
+<tr><td><code>asset_build_document_snapshots</code></td></tr>
+<tr><td><code>asset_publish_releases</code>（4 status）</td></tr>
+</tbody></table></div></div>
+
+<div class="card" style="border-left:3px solid var(--cv)"><h3 style="color:var(--cv)">mining_runtime — 执行状态库</h3><p style="font-size:.86rem;color:var(--t2)">Pipeline 运行时状态跟踪。支持断点续跑。</p>
+<div class="tw" style="margin-top:8px"><table><thead><tr><th>表</th><th>职责</th><th>关键列</th></tr></thead><tbody>
+<tr><td><code>mining_runs</code></td><td>Pipeline 执行记录</td><td>status (6 种), batch_scope, source_folder_path</td></tr>
+<tr><td><code>mining_run_documents</code></td><td>文档处理状态</td><td>action (NEW/UPDATE/SKIP/REMOVE/ERROR)</td></tr>
+<tr><td><code>mining_run_stage_events</code></td><td>阶段事件流水</td><td>stage (9 种), event_type, duration_ms</td></tr>
+</tbody></table></div></div>
+</div>
+
+<div class="co"><strong>CQRS 边界：</strong>Mining 写入 asset_core 的所有内容表（segments/relations/units）和控制表（builds/releases）。Serving 只通过 asset_publish_releases 找到 active release，然后只读查询。两个子系统不互相 import，仅通过 SQL schema 对接。</div>
+</section>
+
+<!-- S4: 共享快照 -->
+<section class="sec" id="snapshot"><div class="sh"><span class="sn">04</span><h2>共享快照模型</h2><p>v1.1 核心内容复用机制：基于内容的寻址存储，相同内容只存一份。</p></div>
+
+<div class="dia"><div class="dia-t">三层模型</div>
+<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+<div class="fb" style="flex:1;border-color:var(--cb);background:#eff6ff"><div class="fl">DOCUMENT</div><div class="fv">逻辑身份（document_key 唯一）</div></div><div class="fa">→</div>
+<div class="fb" style="flex:1;border-color:var(--cv);background:#f5f3ff"><div class="fl">SNAPSHOT</div><div class="fv">内容快照（hash 唯一）</div></div><div class="fa">→</div>
+<div class="fb" style="flex:1;border-color:var(--ct);background:#f0fdfa"><div class="fl">LINK</div><div class="fv">文档到快照映射</div></div>
+</div></div>
+
+<div class="cg cg2">
+<div class="card"><h3>归一化策略（保守）</h3>
+<pre style="font-size:.76rem;margin-top:6px">1. CRLF → LF
+2. 每行去除尾部空白
+3. 去除空行
+4. SHA256</pre>
+</div>
+<div class="card"><h3>三种文档行为</h3>
+<div class="tw" style="margin-top:6px"><table><thead><tr><th>分类</th><th>行为</th></tr></thead><tbody>
+<tr><td><span class="b be">NEW</span></td><td>创建 document + snapshot + link + 所有内容</td></tr>
+<tr><td><span class="b bb">UPDATE</span></td><td>创建新 snapshot，清理旧 snapshot 的 segments/relations/units</td></tr>
+<tr><td><span class="b bt">SKIP</span></td><td>直接复用现有 snapshot，不做任何处理</td></tr>
+</tbody></table></div></div>
+</div>
+</section>
+
+<!-- S5: 增强策略 -->
+<section class="sec" id="enrich"><div class="sh"><span class="sn">05</span><h2>增强与关系策略</h2></div>
+
+<div class="cg cg2">
+<div class="card" style="border-left:3px solid var(--cb)"><h3 style="color:var(--cb)">S4 Enrich — 实体与角色</h3>
+<div class="tw" style="margin-top:6px"><table><thead><tr><th>增强器</th><th>说明</th></tr></thead><tbody>
+<tr><td>RuleBasedEntityExtractor</td><td>正则提取命令/网络元素/参数实体</td></tr>
+<tr><td>DefaultRoleClassifier</td><td>语义角色分类（parameter/example/constraint 等 11 种）</td></tr>
+<tr><td>Table Metadata</td><td>列数、是否有参数列</td></tr>
+</tbody></table></div>
+<div class="co" style="border-color:var(--cb);margin-top:10px"><strong>v1.2 增强：</strong>LLM 替换规则引擎。semantic entity extraction + document_type 自动分类 + section summary。</div>
+</div>
+
+<div class="card" style="border-left:3px solid var(--cv)"><h3 style="color:var(--cv)">S5 Relations — 结构关系</h3>
+<div class="tw" style="margin-top:6px"><table><thead><tr><th>关系类型</th><th>说明</th><th>距离约束</th></tr></thead><tbody>
+<tr><td><code>previous</code> / <code>next</code></td><td>相邻段落顺序</td><td>distance=1</td></tr>
+<tr><td><code>same_section</code></td><td>同一 section 下段落</td><td>distance≤5（防 O(n²)）</td></tr>
+<tr><td><code>section_header_of</code></td><td>标题→内容</td><td>—</td></tr>
+<tr><td><code>same_parent_section</code></td><td>同一父级 section</td><td>—</td></tr>
+</tbody></table></div>
+<div class="co" style="border-color:var(--cv);margin-top:10px"><strong>v1.2 增强：</strong>语篇语义关系（Discourse-Aware RAG）。24 种 RST 关系标签空间：elaboration / cause_effect / contrast / condition 等。</div>
+</div>
+</div>
+
+<div class="card" style="margin-top:14px;border-left:3px solid var(--ce)"><h3 style="color:var(--ce)">S6 Retrieval Units — 四种载体</h3>
+<div class="tw" style="margin-top:6px"><table><thead><tr><th>unit_type</th><th>生成方式</th><th>用途</th></tr></thead><tbody>
+<tr><td><code>raw_text</code></td><td>1:1 映射原始 segment</td><td>精确匹配</td></tr>
+<tr><td><code>contextual_text</code></td><td>添加 section 路径前缀</td><td>带上下文的检索</td></tr>
+<tr><td><code>entity_card</code></td><td>聚合同一实体引用</td><td>实体检索</td></tr>
+<tr><td><code>generated_question</code></td><td>LLM 生成（v1.2 batch async）</td><td>问题导向检索</td></tr>
+</tbody></table></div>
+<p style="font-size:.86rem;color:var(--t2);margin-top:8px">同时产出：<code>search_text</code>（FTS5 索引）、<code>facets_json</code>（过滤维度）、<code>source_refs_json</code>（溯源链）。</p>
+</div>
+</section>
+
+<!-- S6: LLM 集成 -->
+<section class="sec" id="llm"><div class="sh"><span class="sn">06</span><h2>LLM 集成点</h2></div>
+<div class="dia"><div class="dia-t">Mining → LLM Service 调用架构</div>
+<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+<div class="fb p"><div class="fl">MINING</div><div class="fv">llm_client.py</div></div><div class="fa">→</div>
+<div class="fb p"><div class="fl">SUBMIT</div><div class="fv">批量异步</div></div><div class="fa">→</div>
+<div class="fb" style="border-color:var(--co);background:#ffedd5"><div class="fl">LLM SERVICE</div><div class="fv">:8900 Worker</div></div><div class="fa">→</div>
+<div class="fb" style="border-color:var(--co);background:#ffedd5"><div class="fl">PROVIDER</div><div class="fv">DeepSeek / OpenAI</div></div>
+<div class="fa">→</div>
+<div class="fb p"><div class="fl">POLL</div><div class="fv">批量取结果</div></div>
+</div></div>
+
+<div class="tw"><table><thead><tr><th>阶段</th><th>LLM 用途</th><th>模式</th><th>模板</th><th>状态</th></tr></thead><tbody>
+<tr><td>S6 retrieval_units</td><td>问题生成（generated_question）</td><td>Batch async（submit_all → poll_all）</td><td><code>mining-question-gen</code></td><td><span class="b be">已实现</span></td></tr>
+<tr><td>S4 enrich</td><td>语义实体提取</td><td>Batch async</td><td>—</td><td><span class="b ba">v1.2 规划</span></td></tr>
+<tr><td>S4 enrich</td><td>摘要 / 分类</td><td>Batch async</td><td>—</td><td><span class="b ba">v1.2 规划</span></td></tr>
+<tr><td>S5 relations</td><td>语篇关系提取</td><td>Batch async</td><td>—</td><td><span class="b ba">v1.2 规划</span></td></tr>
+<tr><td>S6 retrieval_units</td><td>上下文增强（Contextual Retrieval）</td><td>Batch async</td><td>—</td><td><span class="b ba">v1.2 规划</span></td></tr>
+<tr><td>S6 retrieval_units</td><td>假设文档嵌入（HyDE）</td><td>Batch async</td><td>—</td><td><span class="b ba">v1.2 规划</span></td></tr>
+</tbody></table></div>
+
+<div class="co"><strong>降级策略：</strong>LLM Service 不可用时，Pipeline 自动降级为 NoOp（跳过 LLM 增强步骤），不阻塞主流程。所有 LLM 调用通过 idempotency_key 防止重复提交。</div>
+</section>
+
+<!-- S7: 设计决策 -->
+<section class="sec" id="design"><div class="sh"><span class="sn">07</span><h2>关键设计决策</h2></div>
+<div class="cg cg3">
+<div class="card"><h3>不可变数据模式</h3><p style="font-size:.86rem;color:var(--t2)">12 个内部 dataclass 全部使用 <code>frozen=True</code>。防止副作用，便于调试和并发安全。</p></div>
+<div class="card"><h3>结构化信息保留</h3><p style="font-size:.86rem;color:var(--t2)">SectionNode 树保留 table 列结构、list 编号、code 语言标记。下游检索单元可基于结构生成高质量内容。</p></div>
+<div class="card"><h3>FTS5 全文索引</h3><p style="font-size:.86rem;color:var(--t2)">SQLite FTS5 虚拟表 + 触发器自动同步。v1.2 增加 jieba 中文分词支持。</p></div>
+<div class="card"><h3>增量构建</h3><p style="font-size:.86rem;color:var(--t2)">自动判断 full / incremental 模式。通过 content_hash 检测文档变化，SKIP 未变文档。</p></div>
+<div class="card"><h3>断点续跑</h3><p style="font-size:.86rem;color:var(--t2)">RuntimeTracker 记录每个阶段的 stage_event。支持从失败点恢复执行（ResumePlan）。</p></div>
+<div class="card"><h3>多格式解析</h3><p style="font-size:.86rem;color:var(--t2)">工厂模式支持 Markdown / PlainText / Passthrough。HTML/PDF/DOCX 登记但不解析正文。</p></div>
+</div>
+</section>
+
+<!-- S8: v1.2 -->
+<section class="sec" id="v12"><div class="sh"><span class="sn">08</span><h2>v1.2 演进方向</h2></div>
+<div class="tw"><table><thead><tr><th>EVO</th><th>方向</th><th>当前 v1.1</th><th>v1.2 目标</th><th>优先级</th></tr></thead><tbody>
+<tr><td>EVO-01</td><td><strong>document_key namespace</strong></td><td>相对路径作为 key</td><td>多产品场景下防止 key 冲突</td><td><span class="b br">HIGH</span></td></tr>
+<tr><td>EVO-02</td><td><strong>REMOVE 语义</strong></td><td>未实现</td><td>检测被删除文件，在 build 中标记 remove</td><td><span class="b br">HIGH</span></td></tr>
+<tr><td>EVO-05</td><td><strong>same_section 距离限制</strong></td><td>无限制</td><td>控制 O(n²) 关系爆炸，限制 distance≤5</td><td><span class="b br">HIGH</span></td></tr>
+<tr><td>EVO-17</td><td><strong>语篇关系提取</strong></td><td>4 种结构关系</td><td>24 种 RST 语义关系（elaboration/cause_effect/contrast）</td><td><span class="b br">HIGH</span></td></tr>
+<tr><td>EVO-21</td><td><strong>父子层级分块</strong></td><td>扁平 segments</td><td>小 chunk 精准匹配 + 大 chunk 完整上下文</td><td><span class="b br">HIGH</span></td></tr>
+<tr><td>EVO-22</td><td><strong>上下文增强检索</strong></td><td>contextual_text 仅加路径</td><td>LLM 为每个 chunk 生成上下文描述（-49% 失败率）</td><td><span class="b ba">MEDIUM</span></td></tr>
+<tr><td>EVO-03</td><td><strong>scope 一等实体</strong></td><td>JSON 字段</td><td>独立维度，支持多产品过滤</td><td><span class="b ba">MEDIUM</span></td></tr>
+<tr><td>EVO-04</td><td><strong>document_type 自动分类</strong></td><td>手动指定</td><td>LLM 自动判断文档类型</td><td><span class="b ba">MEDIUM</span></td></tr>
+<tr><td>EVO-26</td><td><strong>中文处理增强</strong></td><td>基础分词</td><td>jieba tokenization + BGE-M3 多语言 embedding</td><td><span class="b bb">MEDIUM</span></td></tr>
+<tr><td>EVO-23</td><td><strong>语义分块</strong></td><td>结构化分块</td><td>针对非结构化文档的语义分块策略</td><td><span class="b bb">LOW</span></td></tr>
+</tbody></table></div>
+</section>
+
+<footer><div>Knowledge Mining Pipeline Architecture — Internal Technical Document</div><div>2026-04-23</div></footer>
+</div></body></html>
