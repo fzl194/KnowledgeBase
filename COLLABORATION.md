@@ -79,12 +79,18 @@ git commit -m "类型(模块): 简短描述"
 提交消息格式：
 
 ```
-feat(mining-v2): add EmbeddingGenerator operator
-fix(serving-v2): fix vector similarity calculation
-refactor(mining-v2): extract Segmenter protocol
+[你的名字]: 简短描述做了什么
 ```
 
-类型：`feat`（新功能）、`fix`（修 bug）、`refactor`（重构）、`test`（测试）、`docs`（文档）
+参考仓库历史提交风格：
+
+```
+[mining-v2]: add EmbeddingGenerator operator
+[serving-v2]: fix vector similarity calculation
+[mining-v2]: extract Segmenter protocol from hardcoded logic
+```
+
+用 `[模块名]` 开头，后面跟简洁描述即可。
 
 ### 第 4 步：推送到远程
 
